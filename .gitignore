@@ -1,0 +1,7 @@
+node_modules/
+*.log
+
+# Provider icons are downloaded onto the user's machine, never committed here
+assets/
+*.ico
+*.png

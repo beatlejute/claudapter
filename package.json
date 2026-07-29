@@ -1,0 +1,39 @@
+{
+    "name": "claudapter",
+    "version": "2.1.220",
+    "private": true,
+    "type": "module",
+    "description": "Per-tab API provider switching inside the Claude Code for VS Code UI, with an Anthropic-to-OpenAI protocol adapter",
+    "keywords": [
+        "claude-code",
+        "vscode",
+        "anthropic",
+        "openai",
+        "proxy",
+        "provider"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/beatlejute/claudapter.git"
+    },
+    "bugs": {
+        "url": "https://github.com/beatlejute/claudapter/issues"
+    },
+    "homepage": "https://github.com/beatlejute/claudapter#readme",
+    "scripts": {
+        "setup": "node scripts/install.mjs",
+        "apply": "node scripts/apply-patch.mjs",
+        "status": "node scripts/apply-patch.mjs --status",
+        "revert": "node scripts/apply-patch.mjs --revert",
+        "favicons": "node scripts/fetch-favicons.mjs && node scripts/ico-to-png.mjs",
+        "diag": "node --use-env-proxy scripts/diag-proxy.mjs",
+        "proxy": "node --use-env-proxy src/proxy/server.mjs",
+        "login:chatgpt": "node --use-env-proxy scripts/login-chatgpt.mjs",
+        "auth:status": "node scripts/login-chatgpt.mjs --status",
+        "test": "node test/proxy.test.mjs && node test/responses.test.mjs"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}

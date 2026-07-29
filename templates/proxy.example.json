@@ -1,0 +1,17 @@
+{
+    "port": 8787,
+    "env": {
+        "HTTPS_PROXY": "http://user:pass@proxy.example:3128",
+        "HTTP_PROXY": "http://user:pass@proxy.example:3128",
+        "NODE_EXTRA_CA_CERTS": "C:\\certs\\corp-ca.cer"
+    },
+    "upstreams": {
+        "openai": { "baseUrl": "https://api.openai.com/v1", "protocol": "chat" },
+        "codex": {
+            "baseUrl": "https://chatgpt.com/backend-api/codex",
+            "protocol": "responses",
+            "auth": "chatgpt-oauth",
+            "codexBackend": true
+        }
+    }
+}

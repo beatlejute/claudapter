@@ -1,0 +1,11 @@
+{
+    "env": {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/openai",
+        "ANTHROPIC_AUTH_TOKEN": "sk-REPLACE-WITH-YOUR-OPENAI-KEY",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.2",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.2",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.2-mini",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.2",
+        "API_TIMEOUT_MS": "3000000"
+    }
+}
