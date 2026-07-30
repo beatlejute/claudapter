@@ -7,6 +7,15 @@
 
 Claudapter moves that switch into the UI and makes it **per tab**: one tab can run on Anthropic, another on DeepSeek, a third on your ChatGPT subscription.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Command menu — "Switch provider…" entry](images/2.jpg) | ![Profile picker with provider list](images/3.jpg) |
+| *"Switch provider…" appears as the first entry in the Model section of the command menu* | *Each profile from `~/.claude/profiles/` is listed with its actual upstream model* |
+| ![Switched to deepseek — tab icon, badge, model label](images/4.jpg) | ![Running on DeepSeek V4 Pro](images/1.jpg) |
+| *The active profile name appears in the badge; the model picker shows the real upstream model* | *Same tab — answer from DeepSeek V4 Pro, 1M context* |
+
 ## What you get
 
 - **"Switch provider…"** — the first entry in the *Model* section of the command menu, showing the active profile.
