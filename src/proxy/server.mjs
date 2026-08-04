@@ -27,6 +27,7 @@ import { getAuth } from './auth-chatgpt.mjs';
 const RUNTIME = path.join(os.homedir(), '.claude', 'ui-ext');
 const DEFAULT_CONFIG = path.join(RUNTIME, 'proxy.json');
 const LOG_FILE = path.join(RUNTIME, 'proxy.log');
+const PROFILES_DIR = path.join(os.homedir(), '.claude', 'profiles');
 
 // protocol: 'chat' = /chat/completions with an API key; 'responses' = /responses (Responses API).
 // auth: 'key' = key from header/config; 'chatgpt-oauth' = ChatGPT subscription token.
@@ -61,7 +62,104 @@ function loadConfig() {
         config = { ...config, ...raw, upstreams: { ...DEFAULTS.upstreams, ...(raw.upstreams || {}) } };
     } catch {}
     config.port = Number(arg('port', process.env.CCX_PROXY_PORT || config.port));
+    config.profilesDir = arg('profiles-dir', config.profilesDir || PROFILES_DIR);
     return config;
+}
+
+const FAMILY_ENV = {
+    fable: 'ANTHROPIC_DEFAULT_FABLE_MODEL',
+    opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+};
+
+// The CLI applies ANTHROPIC_DEFAULT_<FAMILY>_MODEL only to family aliases ("fable", "opus");
+// a literal id like "claude-fable-5" — the built-in picker entry, a subagent's `model:`, a
+// stale settings.json value — passes through untouched and 400s on a non-Anthropic upstream.
+// The proxy closes that gap with the same env block: any claude-<family>-* id is remapped to
+// the profile's model for that family. A profile applies to the upstream named by the first
+// path segment of its ANTHROPIC_BASE_URL, when that URL routes to this proxy. An optional
+// modelOverrides block in the profile still wins for exact ids.
+function profileModelRules(port, profilesDir) {
+    const byUpstream = {};
+    let files = [];
+    try {
+        files = fs.readdirSync(profilesDir).filter((f) => f.endsWith('.json'));
+    } catch {
+        return byUpstream;
+    }
+    for (const file of files) {
+        let profile;
+        try {
+            profile = JSON.parse(fs.readFileSync(path.join(profilesDir, file), 'utf8'));
+        } catch {
+            continue;
+        }
+        const env = profile.env || {};
+        const base = env.ANTHROPIC_BASE_URL;
+        if (!base) continue;
+        let url;
+        try {
+            url = new URL(base);
+        } catch {
+            continue;
+        }
+        if (!['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) continue;
+        const defaultPort = url.protocol === 'https:' ? 443 : 80;
+        if (Number(url.port || defaultPort) !== port) continue;
+        const name = url.pathname.split('/').filter(Boolean)[0];
+        if (!name) continue;
+
+        const families = {};
+        for (const [family, envVar] of Object.entries(FAMILY_ENV)) if (env[envVar]) families[family] = env[envVar];
+        const exact = profile.modelOverrides && typeof profile.modelOverrides === 'object' ? profile.modelOverrides : {};
+        if (!Object.keys(families).length && !Object.keys(exact).length) continue;
+
+        const prev = byUpstream[name] || { exact: {}, families: {} };
+        byUpstream[name] = {
+            exact: { ...prev.exact, ...exact },
+            families: { ...prev.families, ...families },
+        };
+    }
+    return byUpstream;
+}
+
+// Profiles are read per request, cached by mtime/size: editing a profile applies on the next
+// request, no proxy restart. The stat pass is a handful of tiny files — noise next to the call.
+function createModelRulesLoader(config) {
+    const dir = config.profilesDir || PROFILES_DIR;
+    let signature = null;
+    let rules = {};
+    return (name) => {
+        let sig = '';
+        try {
+            for (const f of fs.readdirSync(dir)) {
+                if (!f.endsWith('.json')) continue;
+                const st = fs.statSync(path.join(dir, f));
+                sig += `${f}:${st.mtimeMs}:${st.size};`;
+            }
+        } catch {
+            sig = '';
+        }
+        if (sig !== signature) {
+            signature = sig;
+            rules = profileModelRules(config.port, dir);
+        }
+        return rules[name];
+    };
+}
+
+// Remaps the model the caller sent to what the upstream should get. Exact ids (a profile's
+// optional modelOverrides block) win; otherwise a claude-* id is resolved by family.
+// A trailing [1m]/[2m] context marker is stripped before lookup so "claude-fable-5[1m]" matches.
+function resolveUpstreamModel(model, rules) {
+    if (!rules || !model) return model;
+    const stripped = model.replace(/\[[12]m\]$/i, '');
+    const exact = rules.exact?.[model] ?? rules.exact?.[stripped];
+    if (exact) return exact;
+    if (!/^claude-/i.test(stripped)) return model;
+    const family = Object.keys(FAMILY_ENV).find((f) => stripped.includes(f));
+    return (family && rules.families?.[family]) || model;
 }
 
 function log(...parts) {
@@ -107,15 +205,17 @@ function writeEvent(res, event, data) {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-async function buildUpstreamCall(req, anthropic, upstream, name) {
+async function buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel } = {}) {
     const protocol = upstream.protocol || 'chat';
     const base = upstream.baseUrl.replace(/\/$/, '');
     // What the caller asked for, which is not always what the upstream is asked for: the codex
     // backend only streams, so `request.stream` can be true while the caller wants one JSON body.
     const clientStream = !!anthropic.stream;
+    // modelOverrides remap the model the caller asked for before the upstream ever sees it
+    const request = upstreamModel ? { ...anthropic, model: upstreamModel } : anthropic;
 
     if (protocol === 'responses') {
-        const request = anthropicToResponses(anthropic, {
+        const translated = anthropicToResponses(request, {
             codexBackend: !!upstream.codexBackend,
             reasoningEffort: upstream.reasoningEffort,
         });
@@ -131,10 +231,10 @@ async function buildUpstreamCall(req, anthropic, upstream, name) {
             const key = upstreamKey(req, upstream);
             if (key) headers.authorization = `Bearer ${key}`;
         }
-        return { protocol, url: `${base}/responses`, headers, request, stream: clientStream };
+        return { protocol, url: `${base}/responses`, headers, request: translated, stream: clientStream };
     }
 
-    const request = anthropicToOpenAI(anthropic);
+    const translated = anthropicToOpenAI(request);
     const key = upstreamKey(req, upstream);
     return {
         protocol,
@@ -144,12 +244,12 @@ async function buildUpstreamCall(req, anthropic, upstream, name) {
             ...(key ? { authorization: `Bearer ${key}` } : {}),
             ...(upstream.headers || {}),
         },
-        request,
+        request: translated,
         stream: clientStream,
     };
 }
 
-async function handleMessages(req, res, body, upstream, name) {
+async function handleMessages(req, res, body, upstream, name, modelRules) {
     let anthropic;
     try {
         anthropic = JSON.parse(body);
@@ -157,9 +257,14 @@ async function handleMessages(req, res, body, upstream, name) {
         return sendError(res, 400, 'invalid JSON body', 'invalid_request_error');
     }
 
+    // Remap the model the caller asked for (e.g. a literal "claude-fable-5" from the
+    // built-in picker) to what the profile's env block says this upstream should get
+    const requestedModel = anthropic.model;
+    const upstreamModel = resolveUpstreamModel(requestedModel, modelRules);
+
     let call;
     try {
-        call = await buildUpstreamCall(req, anthropic, upstream, name);
+        call = await buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel });
     } catch (e) {
         return sendError(res, 401, e.message, 'authentication_error');
     }
@@ -169,6 +274,7 @@ async function handleMessages(req, res, body, upstream, name) {
         upstream: name,
         protocol,
         model: request.model,
+        ...(requestedModel !== upstreamModel ? { requested: requestedModel } : {}),
         stream: !!call.stream,
         items: protocol === 'responses' ? request.input.length : request.messages.length,
         tools: request.tools ? request.tools.length : 0,
@@ -364,6 +470,7 @@ async function collectResponses(req, res, upstreamResponse, request) {
 }
 
 function createServer(config) {
+    const rulesFor = createModelRulesLoader(config);
     return http.createServer(async (req, res) => {
         const url = new URL(req.url, 'http://localhost');
         const segments = url.pathname.split('/').filter(Boolean);
@@ -385,7 +492,7 @@ function createServer(config) {
             }
         }
         if (url.pathname.endsWith('/v1/messages') || url.pathname.endsWith('/messages'))
-            return handleMessages(req, res, body, upstream, name);
+            return handleMessages(req, res, body, upstream, name, rulesFor(name));
 
         return sendError(res, 404, `not found: ${url.pathname}`);
     });
@@ -404,4 +511,4 @@ if (isEntrypoint) {
     });
 }
 
-export { createServer, loadConfig, DEFAULTS };
+export { createServer, loadConfig, DEFAULTS, profileModelRules };
