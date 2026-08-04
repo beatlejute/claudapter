@@ -5,7 +5,11 @@
 import http from 'node:http';
 import assert from 'node:assert';
 import { createServer } from '../src/proxy/server.mjs';
-import { anthropicToResponses, responsesToAnthropic } from '../src/proxy/translate-responses.mjs';
+import {
+    anthropicToResponses,
+    responsesToAnthropic,
+    createResponsesCollector,
+} from '../src/proxy/translate-responses.mjs';
 
 const EVENTS = [
     ['response.created', { type: 'response.created', response: { id: 'resp_1', model: 'gpt-5.5' } }],
@@ -27,10 +31,28 @@ const EVENTS = [
         'response.function_call_arguments.delta',
         { type: 'response.function_call_arguments.delta', item_id: 'item_1', delta: 'path":"a.js"}' },
     ],
-    ['response.output_item.done', { type: 'response.output_item.done', item_id: 'item_1', item: { type: 'function_call' } }],
+    [
+        'response.output_item.done',
+        {
+            type: 'response.output_item.done',
+            item_id: 'item_1',
+            item: { type: 'function_call', call_id: 'call_abc', name: 'Read', arguments: '{"file_path":"a.js"}' },
+        },
+    ],
     [
         'response.completed',
-        { type: 'response.completed', response: { usage: { input_tokens: 210, output_tokens: 44 } } },
+        {
+            type: 'response.completed',
+            response: {
+                id: 'resp_1',
+                model: 'gpt-5.5',
+                output: [
+                    { type: 'message', content: [{ type: 'output_text', text: 'Let me check' }] },
+                    { type: 'function_call', call_id: 'call_abc', name: 'Read', arguments: '{"file_path":"a.js"}' },
+                ],
+                usage: { input_tokens: 210, output_tokens: 44 },
+            },
+        },
     ],
 ];
 
@@ -175,6 +197,47 @@ async function main() {
     assert.strictEqual(message.content[0].text, 'done', 'text parsed');
     assert.deepStrictEqual(message.content[1].input, { cmd: 'ls' }, 'arguments parsed');
     assert.strictEqual(message.stop_reason, 'tool_use', 'stop_reason with tool_use present');
+
+    // --- a non-streaming caller gets one JSON message, not SSE.
+    // Claude Code's auto-mode permission classifier asks this way; served with text/event-stream
+    // the SDK hands back the raw body as a string and the classifier dies on `usage.input_tokens`,
+    // which fails closed and denies every Edit.
+    const single = await fetch(`${base}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-test' },
+        body: JSON.stringify({ ...request, stream: false }),
+    });
+    assert.strictEqual(single.status, 200, 'non-streaming HTTP 200');
+    assert.match(
+        single.headers.get('content-type') || '',
+        /application\/json/,
+        'non-streaming request answered as JSON'
+    );
+    const body = await single.json();
+    assert.strictEqual(body.type, 'message', 'body is an Anthropic message');
+    assert.strictEqual(body.usage.input_tokens, 210, 'usage.input_tokens present — the classifier reads it');
+    assert.strictEqual(body.usage.output_tokens, 44, 'usage.output_tokens present');
+    assert.strictEqual(body.content[0].text, 'Let me check', 'text collected from the stream');
+    assert.deepStrictEqual(body.content[1].input, { file_path: 'a.js' }, 'tool arguments collected');
+    assert.strictEqual(body.stop_reason, 'tool_use', 'stop_reason set');
+    assert.strictEqual(lastRequest.body.stream, true, 'the codex backend is still asked to stream');
+
+    // --- collector fallback: a terminal event without `output` falls back to the items seen
+    const collector = createResponsesCollector();
+    collector.event('response.output_item.done', {
+        item: { type: 'message', content: [{ type: 'output_text', text: 'partial' }] },
+    });
+    collector.event('response.completed', { response: { usage: { input_tokens: 7, output_tokens: 1 } } });
+    const rebuilt = responsesToAnthropic(collector.result, 'gpt-5.5');
+    assert.strictEqual(rebuilt.content[0].text, 'partial', 'output rebuilt from item events');
+    assert.strictEqual(rebuilt.usage.input_tokens, 7, 'usage kept from the terminal event');
+
+    // --- truncated answers report max_tokens
+    const truncated = responsesToAnthropic(
+        { output: [], incomplete_details: { reason: 'max_output_tokens' }, usage: {} },
+        'gpt-5.5'
+    );
+    assert.strictEqual(truncated.stop_reason, 'max_tokens', 'max_output_tokens -> max_tokens');
 
     // --- 6a. failure BEFORE the first event: a real HTTP status instead of "200 with an empty body"
     failMode = 'immediate';

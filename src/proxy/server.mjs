@@ -20,6 +20,7 @@ import {
     anthropicToResponses,
     responsesToAnthropic,
     createResponsesStreamTranslator,
+    createResponsesCollector,
 } from './translate-responses.mjs';
 import { getAuth } from './auth-chatgpt.mjs';
 
@@ -109,6 +110,9 @@ function writeEvent(res, event, data) {
 async function buildUpstreamCall(req, anthropic, upstream, name) {
     const protocol = upstream.protocol || 'chat';
     const base = upstream.baseUrl.replace(/\/$/, '');
+    // What the caller asked for, which is not always what the upstream is asked for: the codex
+    // backend only streams, so `request.stream` can be true while the caller wants one JSON body.
+    const clientStream = !!anthropic.stream;
 
     if (protocol === 'responses') {
         const request = anthropicToResponses(anthropic, {
@@ -127,7 +131,7 @@ async function buildUpstreamCall(req, anthropic, upstream, name) {
             const key = upstreamKey(req, upstream);
             if (key) headers.authorization = `Bearer ${key}`;
         }
-        return { protocol, url: `${base}/responses`, headers, request, stream: request.stream };
+        return { protocol, url: `${base}/responses`, headers, request, stream: clientStream };
     }
 
     const request = anthropicToOpenAI(anthropic);
@@ -141,7 +145,7 @@ async function buildUpstreamCall(req, anthropic, upstream, name) {
             ...(upstream.headers || {}),
         },
         request,
-        stream: !!request.stream,
+        stream: clientStream,
     };
 }
 
@@ -183,6 +187,11 @@ async function handleMessages(req, res, body, upstream, name) {
     }
 
     if (!call.stream) {
+        // The codex backend only streams, so an upstream stream can sit behind a caller that wants
+        // one JSON body — answering it with SSE gives the SDK a string where a message should be
+        if (protocol === 'responses' && request.stream)
+            return collectResponses(req, res, upstreamResponse, request);
+
         const payload = await upstreamResponse.json();
         return sendJson(
             res,
@@ -193,7 +202,7 @@ async function handleMessages(req, res, body, upstream, name) {
         );
     }
 
-    if (protocol === 'responses') return streamResponses(req, res, upstreamResponse, request, anthropic);
+    if (protocol === 'responses') return streamResponses(req, res, upstreamResponse, request);
 
     res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
@@ -246,7 +255,53 @@ async function handleMessages(req, res, body, upstream, name) {
     res.end();
 }
 
-async function streamResponses(req, res, upstreamResponse, request, anthropic) {
+// Splits an SSE body into (event name, payload) pairs. Shared by both Responses paths so the
+// streamed and the collected answer are built from exactly the same framing.
+async function readSse(req, upstreamResponse, onEvent) {
+    const reader = upstreamResponse.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let closed = false;
+
+    req.on('close', () => {
+        closed = true;
+        reader.cancel().catch(() => {});
+    });
+
+    while (!closed) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let sep;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+            const block = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+
+            let eventName = null;
+            let dataLine = '';
+            for (const line of block.split('\n')) {
+                if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                else if (line.startsWith('data:')) dataLine += line.slice(5).trim();
+            }
+            if (!dataLine || dataLine === '[DONE]') continue;
+
+            let payload;
+            try {
+                payload = JSON.parse(dataLine);
+            } catch (e) {
+                log('responses chunk parse failed', e.message);
+                continue;
+            }
+            onEvent(eventName || payload.type, payload);
+        }
+    }
+}
+
+// An overloaded upstream is retryable, so it keeps the status the CLI backs off on
+const failureStatus = (message) => (/overload|try again|temporarily/i.test(message) ? 529 : 502);
+
+async function streamResponses(req, res, upstreamResponse, request) {
     // Headers are sent lazily: while they are pending, a failure can still be reported with a real HTTP status;
     // otherwise the CLI sees "200 with an empty body" and cannot tell it was an error
     const ensureHeaders = () => {
@@ -265,55 +320,16 @@ async function streamResponses(req, res, upstreamResponse, request, anthropic) {
         for (const { event, data } of events) writeEvent(res, event, data);
     };
 
-    const reader = upstreamResponse.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let closed = false;
-
-    req.on('close', () => {
-        closed = true;
-        reader.cancel().catch(() => {});
-    });
-
     try {
-        while (!closed) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
+        await readSse(req, upstreamResponse, (name, payload) => emit(translator.event(name, payload)));
 
-            let sep;
-            while ((sep = buffer.indexOf('\n\n')) !== -1) {
-                const block = buffer.slice(0, sep);
-                buffer = buffer.slice(sep + 2);
-
-                let eventName = null;
-                let dataLine = '';
-                for (const line of block.split('\n')) {
-                    if (line.startsWith('event:')) eventName = line.slice(6).trim();
-                    else if (line.startsWith('data:')) dataLine += line.slice(5).trim();
-                }
-                if (!dataLine || dataLine === '[DONE]') continue;
-
-                let payload;
-                try {
-                    payload = JSON.parse(dataLine);
-                } catch (e) {
-                    log('responses chunk parse failed', e.message);
-                    continue;
-                }
-                emit(translator.event(eventName || payload.type, payload));
-            }
-        }
         // A failure must not be closed like a normal response: the CLI would treat it as success and never retry
         if (translator.failure) {
             log('upstream reported failure', translator.failure);
-            const overloaded = /overload|try again|temporarily/i.test(translator.failure);
-            if (!res.headersSent)
-                return sendError(res, overloaded ? 529 : 502, translator.failure, 'overloaded_error');
-            writeEvent(res, 'error', {
-                type: 'error',
-                error: { type: overloaded ? 'overloaded_error' : 'api_error', message: translator.failure },
-            });
+            const status = failureStatus(translator.failure);
+            const type = status === 529 ? 'overloaded_error' : 'api_error';
+            if (!res.headersSent) return sendError(res, status, translator.failure, type);
+            writeEvent(res, 'error', { type: 'error', error: { type, message: translator.failure } });
         } else {
             emit(translator.finish());
         }
@@ -323,6 +339,28 @@ async function streamResponses(req, res, upstreamResponse, request, anthropic) {
         writeEvent(res, 'error', { type: 'error', error: { type: 'api_error', message: e.message } });
     }
     res.end();
+}
+
+// Non-streaming caller in front of a streaming backend: collect the SSE, answer with one message
+async function collectResponses(req, res, upstreamResponse, request) {
+    const collector = createResponsesCollector();
+
+    try {
+        await readSse(req, upstreamResponse, (name, payload) => collector.event(name, payload));
+    } catch (e) {
+        log('stream failed', e.message);
+        return sendError(res, 502, e.message);
+    }
+
+    if (collector.failure) {
+        log('upstream reported failure', collector.failure);
+        const status = failureStatus(collector.failure);
+        return sendError(res, status, collector.failure, status === 529 ? 'overloaded_error' : 'api_error');
+    }
+
+    const payload = collector.result;
+    if (!payload) return sendError(res, 502, 'upstream closed without a response');
+    return sendJson(res, 200, responsesToAnthropic(payload, request.model));
 }
 
 function createServer(config) {

@@ -145,15 +145,61 @@ function responsesToAnthropic(payload, fallbackModel) {
             });
     }
     const usage = payload.usage || {};
+    const truncated = payload.incomplete_details?.reason === 'max_output_tokens';
     return {
         id: payload.id || `msg_${Date.now()}`,
         type: 'message',
         role: 'assistant',
         model: payload.model || fallbackModel,
         content,
-        stop_reason: content.some((c) => c.type === 'tool_use') ? 'tool_use' : stopReasonFor('stop'),
+        stop_reason: content.some((c) => c.type === 'tool_use')
+            ? 'tool_use'
+            : stopReasonFor(truncated ? 'length' : 'stop'),
         stop_sequence: null,
         usage: { input_tokens: usage.input_tokens ?? 0, output_tokens: usage.output_tokens ?? 0 },
+    };
+}
+
+// Collects a Responses SSE stream back into one response object.
+// The codex backend only ever streams, so a caller that asked for a non-streaming
+// answer needs the stream reassembled before it can be translated.
+function createResponsesCollector() {
+    let response = null;
+    let failure = null;
+    const items = [];
+
+    return {
+        event(name, payload) {
+            switch (name) {
+                case 'response.output_item.done':
+                    if (payload.item) items.push(payload.item);
+                    break;
+
+                case 'response.completed':
+                case 'response.incomplete':
+                    if (payload.response) response = payload.response;
+                    break;
+
+                case 'response.failed':
+                    failure = payload.response?.error?.message || 'upstream failure';
+                    break;
+
+                case 'error':
+                    failure = payload.error?.message || payload.message || 'upstream error';
+                    break;
+            }
+        },
+
+        get failure() {
+            return failure;
+        },
+
+        // The terminal event normally carries the whole response; the items seen along the way
+        // are the fallback for a stream that ends without one.
+        get result() {
+            if (response) return response.output?.length ? response : { ...response, output: items };
+            return items.length ? { output: items } : null;
+        },
     };
 }
 
@@ -317,4 +363,10 @@ function createResponsesStreamTranslator(model) {
     };
 }
 
-export { anthropicToResponses, responsesToAnthropic, createResponsesStreamTranslator, CODEX_INSTRUCTIONS };
+export {
+    anthropicToResponses,
+    responsesToAnthropic,
+    createResponsesStreamTranslator,
+    createResponsesCollector,
+    CODEX_INSTRUCTIONS,
+};
