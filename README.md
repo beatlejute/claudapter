@@ -21,7 +21,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **"Switch provider…"** — the first entry in the *Model* section of the command menu, showing the active profile.
 - **Profile picker** — reads `~/.claude/profiles/*.json` and lists each profile with its model.
 - **Per-tab switching** — the `claude` process restarts on the same channel with `resume`, so the conversation history survives. Other tabs are untouched.
-- **Tab icon per provider** — the extension's own pending/done indicators keep working.
+- **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
 
@@ -119,6 +119,13 @@ Tokens are stored in `~/.claude/claudapter/chatgpt-auth.json` and refreshed auto
 The template profile is `codex.json`. Requests go to `https://chatgpt.com/backend-api/codex/responses` with `Authorization: Bearer` and `chatgpt-account-id`.
 
 **Limitations of mode B** — inherent to any such bridge, not to this implementation: Anthropic server-side tools are not proxied, hidden reasoning does not become thinking blocks, the available models depend on the account, and the opus/sonnet/haiku slots are mapped by hand in the profile. The Codex backend always streams and accepts only its own `instructions`, so the Claude Code system prompt is moved into the first input message.
+
+**Keeping the agent loop running.** Two consequences of that last point cost the agent its persistence, and both are handled in `translate-responses.mjs`:
+
+- the harness prompt ends up at the far end of a growing input as an ordinary user turn, outweighed by everything after it — so a short restatement of the agent rules is appended next to the live turn whenever the request carries tools (a title or classifier request, which has none, gets nothing extra);
+- the model plans inside reasoning items that the visible answer never carries, and `store: false` leaves the backend no copy — so the proxy keeps them itself, keyed by the `call_id`s of the response they came with, asks for them back with `include: ["reasoning.encrypted_content"]`, and replays them ahead of the items they produced. A backend that refuses the replay gets one retry without it.
+
+Without either, the model answers conversationally and ends its turn by announcing a step instead of taking it.
 
 ### Corporate proxies and geo-blocking
 

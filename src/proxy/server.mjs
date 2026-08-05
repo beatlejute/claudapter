@@ -12,7 +12,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { anthropicToOpenAI, openAIToAnthropic, createStreamTranslator, estimateTokens } from './translate.mjs';
@@ -21,10 +21,11 @@ import {
     responsesToAnthropic,
     createResponsesStreamTranslator,
     createResponsesCollector,
+    createReasoningStore,
 } from './translate-responses.mjs';
 import { getAuth } from './auth-chatgpt.mjs';
 
-const RUNTIME = path.join(os.homedir(), '.claude', 'ui-ext');
+const RUNTIME = path.join(os.homedir(), '.claude', 'claudapter');
 const DEFAULT_CONFIG = path.join(RUNTIME, 'proxy.json');
 const LOG_FILE = path.join(RUNTIME, 'proxy.log');
 const PROFILES_DIR = path.join(os.homedir(), '.claude', 'profiles');
@@ -194,6 +195,15 @@ function sendError(res, status, message, type = 'api_error') {
     res.end();
 }
 
+// The backend reads this header as "which conversation is this". A fresh uuid per request tells it
+// every turn is a new one, which is also what invalidates a replayed reasoning item. Derived from
+// the opening messages it stays put for the life of a session and differs between sessions.
+function conversationId(input) {
+    const opening = (input || []).filter((i) => i.type === 'message').slice(0, 2);
+    const hex = createHash('sha256').update(JSON.stringify(opening) || 'claudapter').digest('hex');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 function upstreamKey(req, upstream) {
     const header = req.headers['x-api-key'] || '';
     const auth = req.headers.authorization || '';
@@ -205,7 +215,7 @@ function writeEvent(res, event, data) {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-async function buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel } = {}) {
+async function buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel, reasoning } = {}) {
     const protocol = upstream.protocol || 'chat';
     const base = upstream.baseUrl.replace(/\/$/, '');
     // What the caller asked for, which is not always what the upstream is asked for: the codex
@@ -218,6 +228,7 @@ async function buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel
         const translated = anthropicToResponses(request, {
             codexBackend: !!upstream.codexBackend,
             reasoningEffort: upstream.reasoningEffort,
+            reasoning,
         });
         const headers = { 'content-type': 'application/json', ...(upstream.headers || {}) };
 
@@ -226,7 +237,7 @@ async function buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel
             headers.authorization = `Bearer ${accessToken}`;
             if (accountId) headers['chatgpt-account-id'] = accountId;
             headers.originator = 'codex_cli_rs';
-            headers.session_id = randomUUID();
+            headers.session_id = conversationId(translated.input);
         } else {
             const key = upstreamKey(req, upstream);
             if (key) headers.authorization = `Bearer ${key}`;
@@ -249,7 +260,7 @@ async function buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel
     };
 }
 
-async function handleMessages(req, res, body, upstream, name, modelRules) {
+async function handleMessages(req, res, body, upstream, name, modelRules, reasoning) {
     let anthropic;
     try {
         anthropic = JSON.parse(body);
@@ -264,7 +275,7 @@ async function handleMessages(req, res, body, upstream, name, modelRules) {
 
     let call;
     try {
-        call = await buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel });
+        call = await buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel, reasoning });
     } catch (e) {
         return sendError(res, 401, e.message, 'authentication_error');
     }
@@ -289,6 +300,14 @@ async function handleMessages(req, res, body, upstream, name, modelRules) {
 
     if (!upstreamResponse.ok) {
         const text = await upstreamResponse.text().catch(() => '');
+        // Replayed reasoning is the one thing in this request the backend can reject outright, and a
+        // rejected turn would keep being rejected for the rest of the session. Drop the cache and go
+        // again without it: the fallback is exactly the behaviour of a proxy that never cached.
+        if (upstreamResponse.status === 400 && request.include && reasoning?.size) {
+            log('reasoning replay rejected, retrying without it', text.slice(0, 300));
+            reasoning.clear();
+            return handleMessages(req, res, body, upstream, name, modelRules);
+        }
         return sendError(res, upstreamResponse.status, `upstream ${upstreamResponse.status}: ${text.slice(0, 500)}`);
     }
 
@@ -296,7 +315,7 @@ async function handleMessages(req, res, body, upstream, name, modelRules) {
         // The codex backend only streams, so an upstream stream can sit behind a caller that wants
         // one JSON body — answering it with SSE gives the SDK a string where a message should be
         if (protocol === 'responses' && request.stream)
-            return collectResponses(req, res, upstreamResponse, request);
+            return collectResponses(req, res, upstreamResponse, request, reasoning);
 
         const payload = await upstreamResponse.json();
         return sendJson(
@@ -308,7 +327,8 @@ async function handleMessages(req, res, body, upstream, name, modelRules) {
         );
     }
 
-    if (protocol === 'responses') return streamResponses(req, res, upstreamResponse, request);
+    if (protocol === 'responses')
+        return streamResponses(req, res, upstreamResponse, request, reasoning, estimateTokens(anthropic));
 
     res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
@@ -407,7 +427,7 @@ async function readSse(req, upstreamResponse, onEvent) {
 // An overloaded upstream is retryable, so it keeps the status the CLI backs off on
 const failureStatus = (message) => (/overload|try again|temporarily/i.test(message) ? 529 : 502);
 
-async function streamResponses(req, res, upstreamResponse, request) {
+async function streamResponses(req, res, upstreamResponse, request, reasoning, inputTokens) {
     // Headers are sent lazily: while they are pending, a failure can still be reported with a real HTTP status;
     // otherwise the CLI sees "200 with an empty body" and cannot tell it was an error
     const ensureHeaders = () => {
@@ -419,7 +439,7 @@ async function streamResponses(req, res, upstreamResponse, request) {
         });
     };
 
-    const translator = createResponsesStreamTranslator(request.model);
+    const translator = createResponsesStreamTranslator(request.model, { inputTokens });
     const emit = (events) => {
         if (!events.length) return;
         ensureHeaders();
@@ -436,8 +456,17 @@ async function streamResponses(req, res, upstreamResponse, request) {
             const type = status === 529 ? 'overloaded_error' : 'api_error';
             if (!res.headersSent) return sendError(res, status, translator.failure, type);
             writeEvent(res, 'error', { type: 'error', error: { type, message: translator.failure } });
+        } else if (!translator.completed) {
+            // A stream that just stops — dropped by the corporate proxy, cut short upstream — carries no
+            // failure to report. Finishing it normally would hand the CLI a well-formed end_turn: no error,
+            // no retry, and an agent that silently gives up mid-task. Only an error gets it another attempt.
+            const message = 'upstream stream ended without a terminal event';
+            log(message);
+            if (!res.headersSent) return sendError(res, 502, message);
+            writeEvent(res, 'error', { type: 'error', error: { type: 'api_error', message } });
         } else {
             emit(translator.finish());
+            reasoning?.remember(translator.output);
         }
     } catch (e) {
         log('stream failed', e.message);
@@ -448,7 +477,7 @@ async function streamResponses(req, res, upstreamResponse, request) {
 }
 
 // Non-streaming caller in front of a streaming backend: collect the SSE, answer with one message
-async function collectResponses(req, res, upstreamResponse, request) {
+async function collectResponses(req, res, upstreamResponse, request, reasoning) {
     const collector = createResponsesCollector();
 
     try {
@@ -463,14 +492,18 @@ async function collectResponses(req, res, upstreamResponse, request) {
         const status = failureStatus(collector.failure);
         return sendError(res, status, collector.failure, status === 529 ? 'overloaded_error' : 'api_error');
     }
+    if (!collector.completed) return sendError(res, 502, 'upstream stream ended without a terminal event');
 
     const payload = collector.result;
     if (!payload) return sendError(res, 502, 'upstream closed without a response');
+    reasoning?.remember(payload.output);
     return sendJson(res, 200, responsesToAnthropic(payload, request.model));
 }
 
 function createServer(config) {
     const rulesFor = createModelRulesLoader(config);
+    // One store for the process: the keys are call_ids, which are unique across upstreams anyway
+    const reasoning = createReasoningStore();
     return http.createServer(async (req, res) => {
         const url = new URL(req.url, 'http://localhost');
         const segments = url.pathname.split('/').filter(Boolean);
@@ -492,7 +525,7 @@ function createServer(config) {
             }
         }
         if (url.pathname.endsWith('/v1/messages') || url.pathname.endsWith('/messages'))
-            return handleMessages(req, res, body, upstream, name, rulesFor(name));
+            return handleMessages(req, res, body, upstream, name, rulesFor(name), reasoning);
 
         return sendError(res, 404, `not found: ${url.pathname}`);
     });

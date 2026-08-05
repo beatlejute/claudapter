@@ -84,7 +84,11 @@ else r = "claude-logo.svg";
 this.panelTab.iconPath = ge.Uri.file(On.join(this.context.extensionPath, "resources", r));
 ```
 
-It fires on every title change, so an icon set once gets wiped. The fix is to intercept the `iconPath` setter on the panel object and only substitute `claude-logo.svg`, letting pending/done through.
+It fires on every title change, so an icon set once gets wiped. The fix is to intercept the `iconPath` setter on the panel object and substitute all three stock logos — letting `claude-logo-done.svg` through would replace the provider icon with the stock one the moment a message arrives.
+
+The two indicator variants are just the logo with a hole punched in the corner and a dot dropped into it (`cx=19.5 cy=4.5`, hole `r=6.5`, dot `r=4.5`, `#D97757` for done and `#3B82F6` for pending). The hook repeats that geometry over the profile icon and caches the result in `~/.claude/claudapter/icons/badged/<profile>-<state>.svg`, so the brand and the indicator both survive. The profile icon is embedded as a `data:` URI rather than referenced by path: a tab icon is painted as a CSS background, and an SVG in that mode may not load external resources.
+
+The state the extension last asked for is remembered on the panel (`__ccxIconState`), because `decorate()` also repaints the icon on profile changes and would otherwise reset the indicator.
 
 ### An existing session's panel cannot be reopened
 
@@ -153,6 +157,19 @@ Reverse-engineered from the open source of [claudex](https://github.com/pilc80/c
 - `account_id` is extracted from the `id_token` (claim `https://api.openai.com/auth`)
 - existing Codex CLI tokens live in `~/.codex/auth.json` (`tokens.access_token` / `refresh_token` / `account_id`)
 - the backend accepts only its own `instructions` and always streams, so the system prompt has to travel as the first `input` message
+- `session_id` is what ties a request to a conversation; a fresh uuid per request tells the backend every turn is a new one and invalidates any replayed `reasoning` item, so it is derived from the opening messages instead
+
+### Why the agent used to stop mid-task
+
+Three separate things ended a turn early, all of them invisible in the transcript — no error, a well-formed `end_turn`, and an agent that quietly gave up:
+
+| Cause | What it looked like | Fix |
+|---|---|---|
+| the harness prompt sits at input position 1 as a user turn, thirty items behind the live one | the model answers conversationally, announcing a step instead of taking it | a restatement of the agent rules appended after the last turn, when the request carries tools |
+| reasoning items never come back (`store: false`, nothing to carry them through the CLI's history) | the model re-derives its intent from its own prose each request and drops work it had committed to | `include: ["reasoning.encrypted_content"]` plus a proxy-side store keyed by `call_id`, replayed ahead of the items it produced |
+| an SSE that ends without `response.completed` | `finish()` closed it as a normal answer: `stop_reason: end_turn`, no retry | a stream without a terminal event is reported as an error |
+
+The first two are prompt-shaped and degrade gracefully; the third is a protocol bug and was the one that could stop an agent with no trace at all.
 
 ### Full authorize parameter set
 

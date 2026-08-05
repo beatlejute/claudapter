@@ -21,7 +21,10 @@ function versionOf(dirName) {
     return m ? [+m[1], +m[2], +m[3]] : [0, 0, 0];
 }
 
-function defaultIcon() {
+// The extension flips the tab icon between these three on every rename_tab
+const STOCK_LOGO = { idle: 'claude-logo.svg', done: 'claude-logo-done.svg', pending: 'claude-logo-pending.svg' };
+
+function defaultIcon(state = 'idle') {
     const root = path.join(HOME, '.vscode', 'extensions');
     try {
         const dir = fs
@@ -33,7 +36,7 @@ function defaultIcon() {
             })
             .pop();
         if (!dir) return null;
-        const icon = path.join(root, dir, 'resources', 'claude-logo.svg');
+        const icon = path.join(root, dir, 'resources', STOCK_LOGO[state] || STOCK_LOGO.idle);
         return fs.existsSync(icon) ? icon : null;
     } catch {
         return null;
@@ -48,6 +51,7 @@ const S = (globalThis.__ccxState ||= {
     activeSessionByPanel: new Map(),
     profileByWebview: new Map(),
     pendingProfile: null,
+    badges: new Map(),
 });
 
 const LOG_FILE = path.join(DIR, 'debug.log');
@@ -295,9 +299,56 @@ function brandIconFor(panel) {
     return icon && icon !== defaultIcon() ? icon : null;
 }
 
-function isPlainLogo(value) {
+// Which of the three stock logos the extension is trying to install, if any
+function stockLogoState(value) {
     const uri = value && (value.fsPath || value.path || value.light?.fsPath || value.light?.path);
-    return typeof uri === 'string' && /claude-logo\.svg$/i.test(uri);
+    if (typeof uri !== 'string') return null;
+    const file = path.basename(uri).toLowerCase();
+    for (const [state, name] of Object.entries(STOCK_LOGO)) if (file === name) return state;
+    return null;
+}
+
+const BADGE_COLOR = { done: '#D97757', pending: '#3B82F6' };
+const MIME = { '.png': 'image/png', '.svg': 'image/svg+xml' };
+
+// A stock indicator icon is the logo with a hole punched in the corner and a dot dropped into it.
+// Repeat that geometry over the profile icon, otherwise indication simply replaces the brand.
+function badgedIcon(src, state) {
+    const color = BADGE_COLOR[state];
+    if (!color) return src;
+    const cache = (S.badges ||= new Map());
+    const key = `${src}|${state}`;
+    try {
+        const { mtimeMs, size } = fs.statSync(src);
+        const hit = cache.get(key);
+        if (hit && hit.mtimeMs === mtimeMs && hit.size === size && fs.existsSync(hit.out)) return hit.out;
+
+        const ext = path.extname(src).toLowerCase();
+        const data = `data:${MIME[ext] || 'image/png'};base64,${fs.readFileSync(src).toString('base64')}`;
+        const svg =
+            `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="1em" height="1em">` +
+            `<defs><mask id="ccx-badge"><rect width="24" height="24" fill="white"/>` +
+            `<circle cx="19.5" cy="4.5" r="6.5" fill="black"/></mask></defs>` +
+            `<image href="${data}" x="0" y="0" width="24" height="24" mask="url(#ccx-badge)"/>` +
+            `<circle cx="19.5" cy="4.5" r="4.5" fill="${color}"/></svg>`;
+        const out = path.join(ICONS_DIR, 'badged', `${path.basename(src, ext)}-${state}.svg`);
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        let current = null;
+        try {
+            current = fs.readFileSync(out, 'utf8');
+        } catch {}
+        if (current !== svg) fs.writeFileSync(out, svg, 'utf8');
+        cache.set(key, { mtimeMs, size, out });
+        return out;
+    } catch {
+        return src;
+    }
+}
+
+function iconFor(panel, state) {
+    const brand = brandIconFor(panel);
+    if (brand) return badgedIcon(brand, state);
+    return defaultIcon(state) || defaultIcon();
 }
 
 function hookIcon(panel) {
@@ -314,9 +365,13 @@ function hookIcon(panel) {
             return d.get.call(panel);
         },
         set(value) {
-            const brand = isPlainLogo(value) ? brandIconFor(panel) : null;
-            if (!brand) return d.set.call(panel, value);
-            const uri = vscode.Uri.file(brand);
+            const state = stockLogoState(value);
+            if (!state) return d.set.call(panel, value);
+            // Remembered so a later decorate() re-paints the icon in the state the extension last asked for
+            panel.__ccxIconState = state;
+            const icon = iconFor(panel, state);
+            if (!icon) return d.set.call(panel, value);
+            const uri = vscode.Uri.file(icon);
             d.set.call(panel, { light: uri, dark: uri });
         },
     });
@@ -324,9 +379,8 @@ function hookIcon(panel) {
 
 function decorate(panel) {
     hookIcon(panel);
-    const brand = brandIconFor(panel);
     try {
-        const uri = vscode.Uri.file(brand || defaultIcon());
+        const uri = vscode.Uri.file(iconFor(panel, panel.__ccxIconState || 'idle'));
         panel.iconPath = { light: uri, dark: uri };
     } catch {}
 }

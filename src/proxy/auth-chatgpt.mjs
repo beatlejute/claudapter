@@ -20,7 +20,7 @@ const ORIGINATOR = process.env.CCX_OAUTH_ORIGINATOR || 'codex_cli_rs';
 const CALLBACK_PORT = 1455;
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/auth/callback`;
 
-const RUNTIME = path.join(os.homedir(), '.claude', 'ui-ext');
+const RUNTIME = path.join(os.homedir(), '.claude', 'claudapter');
 const STORE = path.join(RUNTIME, 'chatgpt-auth.json');
 const CODEX_AUTH = path.join(os.homedir(), '.codex', 'auth.json');
 
@@ -82,7 +82,7 @@ function storeFrom(payload, previous = {}) {
         id_token: payload.id_token || previous.id_token,
         account_id: accountIdFrom({ ...previous, ...payload }) || previous.account_id || null,
         expires_at: expiresIn ? Date.now() + expiresIn * 1000 : 0,
-        source: 'ui-ext',
+        source: 'claudapter',
     };
 }
 
