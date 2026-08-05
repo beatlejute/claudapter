@@ -5,6 +5,18 @@ import { stopReasonFor, stripModelSuffix } from './translate.mjs';
 
 const CODEX_INSTRUCTIONS = 'You are Claude Code, a software engineering agent running in a terminal.';
 
+// The backend keeps its own `instructions`, so the harness prompt travels as the opening user turn.
+// By turn twenty it sits behind everything that came after it, and the only text in the slot the
+// model weighs most is the one line above — which says nothing about finishing the job. This is the
+// restatement that rides next to the live turn.
+const CODEX_AGENT_REMINDER = [
+    '<system-reminder>',
+    'The instructions in the first message of this conversation are the operating rules for this session and are still in force.',
+    'You are running as an autonomous agent inside a tool loop, not in a chat: carry the task through to completion.',
+    'If the next step is a tool call, make it in this turn — never end a turn by announcing an action you have not taken.',
+    '</system-reminder>',
+].join('\n');
+
 function textOf(blocks) {
     if (typeof blocks === 'string') return blocks;
     if (!Array.isArray(blocks)) return '';
@@ -28,7 +40,60 @@ function toolResultText(block) {
     return '';
 }
 
-function messagesToInput(messages) {
+// A gpt-5 turn plans inside its reasoning items; the visible answer carries only the conclusion.
+// Nothing brings those items back on the next request — Claude Code stores what it was shown, and
+// `store: false` leaves the backend no copy either — so the model re-derives its intent from its own
+// prose every time and abandons work it had already decided to do. The proxy keeps them instead,
+// keyed by what does survive the round trip: the call_ids of that same response, or its text when
+// the turn made no tool call. A miss (proxy restarted, entry evicted) just means today's behaviour.
+function createReasoningStore(limit = 400) {
+    const byKey = new Map();
+    const textKey = (text) => (text ? `t:${text.length}:${text.slice(0, 200)}` : null);
+
+    function keysOf(output) {
+        const keys = [];
+        let text = '';
+        for (const item of output || []) {
+            if (item?.type === 'function_call' && item.call_id) keys.push(`c:${item.call_id}`);
+            if (item?.type === 'message')
+                for (const part of item.content || []) if (part.type === 'output_text' && part.text) text += part.text;
+        }
+        if (keys.length) return keys;
+        const key = textKey(text);
+        return key ? [key] : [];
+    }
+
+    return {
+        remember(output) {
+            const items = (output || []).filter((i) => i?.type === 'reasoning');
+            if (!items.length) return;
+            for (const key of keysOf(output)) {
+                byKey.set(key, items);
+                if (byKey.size > limit) byKey.delete(byKey.keys().next().value);
+            }
+        },
+
+        // The blocks of one assistant message -> the reasoning items that produced it
+        recall(blocks) {
+            for (const block of blocks)
+                if (block?.type === 'tool_use' && block.id) {
+                    const hit = byKey.get(`c:${block.id}`);
+                    if (hit) return hit;
+                }
+            return byKey.get(textKey(textOf(blocks))) || null;
+        },
+
+        clear() {
+            byKey.clear();
+        },
+
+        get size() {
+            return byKey.size;
+        },
+    };
+}
+
+function messagesToInput(messages, reasoning) {
     const input = [];
     for (const message of messages || []) {
         const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: message.content }];
@@ -53,6 +118,10 @@ function messagesToInput(messages) {
             if (content.length) input.push({ type: 'message', role: 'user', content });
             continue;
         }
+
+        // Ahead of the items it produced, which is where the API expects it
+        const recalled = reasoning?.recall(blocks);
+        if (recalled) input.push(...recalled);
 
         const text = textOf(blocks);
         if (text)
@@ -98,15 +167,18 @@ function toolChoiceToResponses(choice) {
 }
 
 function anthropicToResponses(body, options = {}) {
-    const { codexBackend = false, reasoningEffort } = options;
+    const { codexBackend = false, reasoningEffort, reasoning } = options;
     const system = textOf(body.system);
 
     const request = {
         model: stripModelSuffix(body.model),
-        input: messagesToInput(body.messages),
+        input: messagesToInput(body.messages, reasoning),
         stream: codexBackend ? true : !!body.stream,
         store: false,
     };
+
+    // Nothing is stored upstream, so the encrypted plan has to come back with the answer or it is lost
+    if (reasoning) request.include = ['reasoning.encrypted_content'];
 
     // The codex backend only accepts its own instructions, so the system prompt moves into the first input message
     if (codexBackend) {
@@ -124,6 +196,13 @@ function anthropicToResponses(body, options = {}) {
         request.tools = tools;
         const choice = toolChoiceToResponses(body.tool_choice);
         if (choice) request.tool_choice = choice;
+        // Only for a call that can act: title and classifier requests arrive without tools
+        if (codexBackend)
+            request.input.push({
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_text', text: CODEX_AGENT_REMINDER }],
+            });
     }
     if (reasoningEffort) request.reasoning = { effort: reasoningEffort };
 
@@ -166,6 +245,7 @@ function responsesToAnthropic(payload, fallbackModel) {
 function createResponsesCollector() {
     let response = null;
     let failure = null;
+    let completed = false;
     const items = [];
 
     return {
@@ -177,6 +257,7 @@ function createResponsesCollector() {
 
                 case 'response.completed':
                 case 'response.incomplete':
+                    completed = true;
                     if (payload.response) response = payload.response;
                     break;
 
@@ -192,6 +273,12 @@ function createResponsesCollector() {
 
         get failure() {
             return failure;
+        },
+
+        // Whether a terminal event arrived at all. A stream that just stops is a broken answer,
+        // and the caller has to be able to tell that from a short but finished one.
+        get completed() {
+            return completed;
         },
 
         // The terminal event normally carries the whole response; the items seen along the way
@@ -213,15 +300,20 @@ function safeParse(raw) {
 }
 
 // Incremental converter: Responses SSE -> Anthropic events.
-function createResponsesStreamTranslator(model) {
+function createResponsesStreamTranslator(model, options = {}) {
     let started = false;
     let nextIndex = 0;
     let textIndex = null;
     let messageId = `msg_${Date.now()}`;
-    let usage = { input_tokens: 0, output_tokens: 0 };
+    // message_start goes out before the backend has counted anything, and it is the number the CLI
+    // draws its context meter and its auto-compact threshold from — left at zero it never compacts.
+    // So it opens with our estimate and the terminal event corrects it.
+    let usage = { input_tokens: options.inputTokens || 0, output_tokens: 0 };
     let sawToolCall = false;
     let stopReason = 'end_turn';
     let failure = null;
+    let completed = false;
+    let output = [];
     const toolByItem = new Map();
 
     const events = [];
@@ -309,6 +401,7 @@ function createResponsesStreamTranslator(model) {
                 }
 
                 case 'response.output_item.done': {
+                    if (payload.item) output.push(payload.item);
                     const block = toolByItem.get(payload.item_id);
                     if (block && !block.stopped) {
                         push('content_block_stop', { type: 'content_block_stop', index: block.index });
@@ -320,9 +413,11 @@ function createResponsesStreamTranslator(model) {
                 case 'response.completed':
                 case 'response.incomplete': {
                     const response = payload.response || {};
+                    completed = true;
+                    if (response.output?.length) output = response.output;
                     if (response.usage)
                         usage = {
-                            input_tokens: response.usage.input_tokens ?? 0,
+                            input_tokens: response.usage.input_tokens ?? usage.input_tokens,
                             output_tokens: response.usage.output_tokens ?? 0,
                         };
                     if (response.incomplete_details?.reason === 'max_output_tokens') stopReason = 'max_tokens';
@@ -351,7 +446,7 @@ function createResponsesStreamTranslator(model) {
             push('message_delta', {
                 type: 'message_delta',
                 delta: { stop_reason: sawToolCall ? 'tool_use' : stopReason, stop_sequence: null },
-                usage: { output_tokens: usage.output_tokens },
+                usage: { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens },
             });
             push('message_stop', { type: 'message_stop' });
             return drain();
@@ -359,6 +454,15 @@ function createResponsesStreamTranslator(model) {
 
         get failure() {
             return failure;
+        },
+
+        get completed() {
+            return completed;
+        },
+
+        // The raw Responses items behind the answer — what the reasoning store is fed from
+        get output() {
+            return output;
         },
     };
 }
@@ -368,5 +472,7 @@ export {
     responsesToAnthropic,
     createResponsesStreamTranslator,
     createResponsesCollector,
+    createReasoningStore,
     CODEX_INSTRUCTIONS,
+    CODEX_AGENT_REMINDER,
 };
