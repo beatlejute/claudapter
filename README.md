@@ -16,12 +16,18 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 | ![Switched to deepseek — tab icon, badge, model label](images/4.jpg) | ![Running on DeepSeek V4 Pro](images/1.jpg) |
 | *The active profile name appears in the badge; the model picker shows the real upstream model* | *Same tab — answer from DeepSeek V4 Pro, 1M context* |
 
+| |
+|---|
+| ![Session history, each row marked with its provider icon](images/5.jpg) |
+| *The session history: every past session carries the icon of the provider it actually ran on. A session with no recorded provider falls back to whatever `settings.json` points at.* |
+
 ## What you get
 
 - **"Switch provider…"** — the first entry in the *Model* section of the command menu, showing the active profile.
 - **Profile picker** — reads `~/.claude/profiles/*.json` and lists each profile with its model.
 - **Per-tab switching** — the `claude` process restarts on the same channel with `resume`, so the conversation history survives. Other tabs are untouched.
 - **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
+- **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
 
@@ -88,6 +94,8 @@ npm run favicons     # writes <profile>.png|svg straight into ~/.claude/profiles
 ```
 
 Whatever fails to download simply falls back to the generated badge.
+
+The last step of that chain downscales every PNG to 32 px on the long side (`npm run icons:shrink` on its own). Icons are inlined into the webview as base64 and render at 13 px, so a 640×640 favicon would otherwise carry about 1,600× the pixels it ever shows — on the profiles here this cut the inlined payload from 62 KB to 25 KB. A file that cannot be decoded is left exactly as it was.
 
 ## OpenAI and the ChatGPT subscription
 
@@ -162,9 +170,9 @@ VS Code extension host                     webview (UI)
 │  ├─ getHtmlForWebview ───┼── inline ────▶│  webview.js             │
 │  ├─ setupPanel           │               │   ├─ menu entry         │
 │  ├─ spawnClaude: env ◀───┼── profile ────┤   ├─ profile picker     │
-│  └─ onDidReceiveMessage ◀┼── ccx:apply ──┤   └─ model labels       │
-│         host.js          │               └─────────────────────────┘
-│  bindings.json (session → profile)       │
+│  └─ onDidReceiveMessage ◀┼── ccx:apply ──┤   ├─ model labels       │
+│         host.js          │               │   └─ history row icons  │
+│  bindings.json (session → profile)       └─────────────────────────┘
 └──────────────────────────┘
 ```
 
@@ -192,7 +200,7 @@ Keys "owned" by profiles are computed as the union of every `env` across `~/.cla
 
 ### Storage
 
-- `~/.claude/claudapter/bindings.json` — `{ sessionId: profileName }`, survives VS Code restarts
+- `~/.claude/claudapter/bindings.json` — `{ sessionId: profileName }`, survives VS Code restarts. It is also what the history list reads to mark each row; a session that was never launched through Claudapter has no entry and falls back to the profile matching `settings.json`.
 - the tab's profile in memory — for the window between choosing a provider and the session being created
 - `~/.claude/settings.json` is **never modified**
 

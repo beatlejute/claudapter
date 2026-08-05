@@ -127,11 +127,56 @@ if (t === "Model") {
 
 So the position of a custom entry is set by adding its id to that array, not by registration order.
 
+### The session history carries no session id
+
+The history row (`webview/index.js`, minified `ELt`, anchor `` className:`${bn.sessionItem}` ``) is a bare
+`<button>` whose entire prop object is `{ref, className, onClick, onMouseMove, children}` — no `id`, no
+`data-*`, no `title`, no `aria-label`. The session id exists only as the React key at the call site,
+`Ue.sessionId.value ?? et`, and React never serialises keys to the DOM. `data-session-id` and
+`data-session` have zero occurrences in the whole 4.6 MB bundle.
+
+React writes `__reactFiber$<random>` onto every host node it creates, but that pointer is set at mount
+(`createInstance`) and never refreshed — `commitWork` updates only `__reactProps$`. With double buffering,
+`el[__reactFiber$…]` is therefore the *stale alternate* on roughly every other commit, so `memoizedProps`
+cannot be trusted for scalar props. `createWorkInProgress` does copy `key` onto the alternate, which makes
+`fiber.key` the one stale-proof read — and it is exactly the session id.
+
+A non-UUID key is the array-index fallback: the session had no id when it rendered. Those rows are refused
+outright, which also removes the only case that could yield a *wrong* session — two index-keyed rows
+swapping positions and rebinding a reused fiber pair.
+
+That refusal is what makes the *other* fallback safe. A row whose id resolves but carries no entry in
+`bindings.json` ran on whatever `settings.json` said at the time, so it takes the mark of the profile that
+matches `settings.json` now — the stock Claude logo on an untouched install. The host computes that once
+(`fallbackIcon`) and withholds it entirely when `settings.json` names a base URL no profile describes,
+because then the answer is genuinely unknown. The distinction that matters: an id that resolved but has no
+binding is a session we can reason about, while an id that did not resolve is a row we cannot attach
+anything to without risking the wrong session.
+
+The icon is painted as a `::before` pseudo-element with `background-image:var(--ccx-icon)` rather than an
+injected `<img>` child: React reconciles host children by index, and `className` is rewritten on every
+`isActive`/`isFocused` change, so a class or a child node of ours would be wiped. `data-*` attributes and
+inline `style` are not React-managed on that button and survive. The row is
+`display:flex;align-items:center;gap:8px`, so the pseudo-element simply becomes its leading flex item.
+
+The list is reachable at all because `resolveSessionListView` builds the sidebar view through the *same*
+`getHtmlForWebview` as the chat panel — the injected script is already present in both surfaces, so this
+needed no sixth injection point.
+
 ### CSP and loading your own script
 
 `getHtmlForWebview` (line 126008) emits `script-src 'nonce-…'` (line 126039), and `localResourceRoots` is limited to the `webview/` and `resources/` directories inside the extension. An external file cannot be referenced by URI — hence the custom code is inlined into the HTML with their nonce, while the text itself is read from disk when the page is generated (so edits apply without re-patching).
 
 Execution order: their inline flag script → our classic script → their bundle (`type="module"`, deferred). That lets our code call `acquireVsCodeApi()` first and replace the global with a proxy that sees every outgoing message. Unknown types are ignored by the UI — its listener only reacts to `type === "from-extension"`.
+
+The same tag emits `img-src ${e.cspSource} data:`, and that `data:` is the only reason profile icons can be
+inlined as base64 at all: `localResourceRoots` covers just `webview/` and `resources/` inside the extension,
+so `~/.claude/profiles` can never be referenced by URI. `style-src` carries `'unsafe-inline'`, which is what
+lets the injected `<style>` block work without a nonce. `font-src` has **no** `data:`, so an icon-font
+strategy is not available. Note also that an SVG loaded through `<img src="data:…">` is an isolated
+document: it does not inherit `currentColor` or any VS Code theme variable, and in percent-encoded form a
+literal `#` truncates the URL. Brand marks are unaffected — they carry their own colours — but a
+theme-coloured glyph would have to be an inline `<svg>` element instead.
 
 ## Non-Anthropic providers
 

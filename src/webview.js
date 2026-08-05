@@ -16,7 +16,9 @@
         window.acquireVsCodeApi = function () { return proxy; };
     }
 
-    var state = { profiles: [], active: null, sessionId: null };
+    var state = { profiles: [], active: null, sessionId: null, bindings: {} };
+    var icons = {};
+    var fallback = null;
     var registry = null;
     var ctx = null;
     var jsx = null;
@@ -181,11 +183,17 @@
                 profiles: d.profiles || [],
                 active: d.active || null,
                 models: d.models || null,
+                bindings: d.bindings || {},
                 sessionId: d.sessionId || state.sessionId,
             };
             syncAction();
             syncChip();
             decorateModelPicker();
+            decorateSessionList();
+        } else if (d.type === 'ccx:icons') {
+            icons = d.icons || {};
+            fallback = d.fallback || null;
+            decorateSessionList();
         } else if (d.type === 'ccx:applied') {
             if (d.sessionId && !state.sessionId) state.sessionId = d.sessionId;
             restartChannel(d.name);
@@ -233,11 +241,111 @@
         });
     }
 
+    // The session id is nowhere in the DOM: the history row is a bare <button> whose entire prop object
+    // is {ref, className, onClick, onMouseMove, children}, and the id exists only as the React key at the
+    // call site. React writes __reactFiber$<random> onto every host node it creates, but that pointer is
+    // set at mount and never refreshed — with double buffering it is the stale alternate about every other
+    // commit, so memoizedProps cannot be trusted. createWorkInProgress does copy `key` onto the alternate,
+    // which makes fiber.key the one stale-proof read — and it is exactly the session id.
+    var CCX_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    var fiberKey = null;
+
+    function fiberKeyOf(node) {
+        if (fiberKey && fiberKey in node) return fiberKey;
+        var names = Object.keys(node);
+        for (var i = 0; i < names.length; i++) {
+            if (names[i].indexOf('__reactFiber$') === 0) {
+                fiberKey = names[i];
+                return fiberKey;
+            }
+        }
+        return null;
+    }
+
+    // The session's own fields are signals — read through .value
+    function signalValue(v) {
+        try {
+            return v && typeof v === 'object' && 'value' in v ? v.value : undefined;
+        } catch (e) {
+            return undefined;
+        }
+    }
+
+    // Two independent reads of the same value. A non-UUID key means the parent fell back to the array
+    // index (the session had no id when it rendered), and a disagreement means the fiber is stale or
+    // re-keyed — both give up, because a wrong provider icon is worse than none.
+    function sessionIdOfRow(row) {
+        var key = fiberKeyOf(row);
+        var fiber = key ? row[key] : null;
+        if (!fiber) return null;
+        var fromKey = null;
+        var fromProps = null;
+        for (var d = 0; fiber && d < 4; d++, fiber = fiber.return) {
+            if (!fromKey && typeof fiber.key === 'string' && CCX_UUID.test(fiber.key)) fromKey = fiber.key;
+            if (!fromProps) {
+                var session = fiber.memoizedProps && fiber.memoizedProps.session;
+                var id = session && signalValue(session.sessionId);
+                if (typeof id === 'string' && CCX_UUID.test(id)) fromProps = id;
+            }
+            if (fromKey && fromProps) break;
+        }
+        if (!fromKey) return null;
+        if (fromProps && fromProps !== fromKey) return null;
+        return fromKey;
+    }
+
+    function applyRowIcon(row) {
+        var id = null;
+        try {
+            id = sessionIdOfRow(row);
+        } catch (e) {
+            id = null;
+        }
+        var name = (id && state.bindings && state.bindings[id]) || null;
+        var uri = (name && icons[name]) || null;
+        // A resolved session with no binding of its own ran on whatever settings.json said, so it takes
+        // the host's fallback mark. An UNRESOLVED row takes nothing: guessing there could put a provider
+        // on the wrong session, and a wrong icon is worse than none.
+        var assumed = false;
+        if (id && !uri && fallback && fallback.uri) {
+            name = fallback.name;
+            uri = fallback.uri;
+            assumed = true;
+        }
+        var stamp = uri ? id + '|' + name + (assumed ? '|~' : '') : '';
+        if (row.dataset.ccxRow === stamp) return;
+        row.dataset.ccxRow = stamp;
+        if (!uri) {
+            row.removeAttribute('data-ccx-provider');
+            row.style.removeProperty('--ccx-icon');
+            row.removeAttribute('title');
+            return;
+        }
+        // data-* and inline style survive React's commits; className does not — it is rewritten on every
+        // isActive/isFocused change, so the icon must not hang off a class of ours
+        row.setAttribute('data-ccx-provider', name);
+        row.style.setProperty('--ccx-icon', 'url("' + uri + '")');
+        row.title = 'Provider: ' + name + (assumed ? ' (default — not recorded for this session)' : '');
+    }
+
+    function decorateSessionList() {
+        try {
+            // The _<hash> suffix is a CSS-module content hash — match by prefix, never literally
+            var rows = document.querySelectorAll('button[class*="sessionItem_"]');
+            for (var i = 0; i < rows.length; i++) applyRowIcon(rows[i]);
+        } catch (e) {
+            /* an unrecognised list is a list without icons, not a broken webview */
+        }
+    }
+
     function watchPicker() {
         var timer = null;
         new MutationObserver(function () {
             clearTimeout(timer);
-            timer = setTimeout(decorateModelPicker, 60);
+            timer = setTimeout(function () {
+                decorateModelPicker();
+                decorateSessionList();
+            }, 60);
         }).observe(document.body, { childList: true, subtree: true });
     }
 
@@ -311,6 +419,9 @@
         '.ccx-model{margin-left:auto;opacity:.6;font-size:11px}',
         '.ccx-prov-tag{opacity:.7;font-size:11px;padding:1px 6px;border-radius:8px;background:var(--vscode-badge-background)}',
         '.ccx-model-tag{margin-left:6px;opacity:.55;font-size:10px;font-family:var(--vscode-editor-font-family, monospace)}',
+        // The row is display:flex;align-items:center;gap:8px, so ::before simply becomes its leading flex
+        // item and the flex:1 title still ellipsizes. No child node, so nothing for React to reconcile.
+        'button[data-ccx-provider]::before{content:"";flex:0 0 auto;width:13px;height:13px;margin-right:-3px;border-radius:3px;background-image:var(--ccx-icon);background-size:contain;background-position:center;background-repeat:no-repeat;opacity:.9}',
         '.ccx-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:10001;display:flex;gap:8px;align-items:center;padding:8px 12px;border-radius:6px;font:12px var(--vscode-font-family);color:var(--vscode-notifications-foreground, var(--vscode-foreground));background:var(--vscode-notifications-background, var(--vscode-editorWidget-background));border:1px solid var(--vscode-notificationCenter-border, var(--vscode-widget-border));box-shadow:0 4px 16px rgba(0,0,0,.4)}',
         '.ccx-toast-btn{font:12px var(--vscode-font-family);padding:3px 10px;border-radius:4px;cursor:pointer;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:none}',
         '.ccx-toast-skip{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}',
@@ -320,10 +431,12 @@
     send({ type: 'ccx:get' });
     if (document.body) {
         syncChip();
+        decorateSessionList();
         watchPicker();
     } else {
         document.addEventListener('DOMContentLoaded', function () {
             syncChip();
+            decorateSessionList();
             watchPicker();
         });
     }
