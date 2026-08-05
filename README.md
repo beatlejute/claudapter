@@ -197,14 +197,18 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 
 ### Version branches
 
-`main` always tracks the newest extension version the signatures were verified against. Every version that `main` moves off keeps its own branch, so an older extension stays usable:
+`main` always tracks the newest extension version the signatures were verified against. Every supported version also has its own `v<version>` branch pointing at the last commit that works with it, so an older extension stays usable — check out the branch that matches your install:
 
-| Branch | Extension |
-|---|---|
-| `main` | 2.1.222 (also verified against 2.1.221) |
-| `v2.1.220` | 2.1.220 |
+| Branch | Extension | Injection point #3 |
+|---|---|---|
+| `main` | 2.1.222 — newest | structural match |
+| `v2.1.222` | 2.1.222 | structural match |
+| `v2.1.221` | 2.1.221 | structural match |
+| `v2.1.220` | 2.1.220 | literal `f.env=w,g)` |
 
-When adapting to a new release: branch the current `main` as `v<old-version>`, then bump `package.json`, this README and [docs/internals.md](docs/internals.md) on `main`.
+One commit can serve several versions: since injection point #3 stopped depending on minified names, the same code covers 2.1.221 and 2.1.222, so both branches point at it.
+
+When adapting to a new release: verify the signatures against it, bump `package.json`, this README and [docs/internals.md](docs/internals.md) on `main`, then tag the result with a fresh `v<version>` branch.
 
 ## Diagnostics
 
