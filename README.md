@@ -1,7 +1,7 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.220**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.222**.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -28,7 +28,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.220**)
+- The `anthropic.claude-code` extension installed (verified against **2.1.222**; the signatures also match 2.1.221)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
@@ -167,7 +167,7 @@ VS Code extension host                     webview (UI)
 |---|---|---|---|
 | 1 | `extension.js` | `<script nonce="${u}" src="${a}" type="module">` | inline `webview.js` with their nonce + the `ccx:*` channel |
 | 2 | `extension.js` | `e.iconPath={light:a,dark:a},` in `setupPanel` | intercept the tab icon |
-| 3 | `extension.js` | `f.env=w,g)` in `spawnClaude` | **substitute `ANTHROPIC_*` when the process starts** |
+| 3 | `extension.js` | `…pathToClaudeCodeExecutable=…,…env=…)` in `spawnClaude` | **substitute `ANTHROPIC_*` when the process starts** |
 | 4 | `webview/index.js` | `n.commandRegistry.registerAction({id:"model"` | access their command registry and jsx factory |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
 
@@ -192,6 +192,19 @@ Keys "owned" by profiles are computed as the union of every `env` across `~/.cla
 ## After a Claude Code update
 
 VS Code installs the new version into a separate folder, so the patch is gone. Re-run `node scripts/install.mjs` and reload the window. If the signatures changed in the new bundle, the patcher stops with an explicit error naming the mismatch instead of corrupting anything.
+
+`scripts/apply-patch.mjs` warns when the installed extension version differs from the one in `package.json`, but it is only a warning — a signature that still matches is still applied. The minified locals are the fragile part, so injection point #3 matches the *shape* of the assignment rather than the names; the other four are anchored to string literals that survive minification.
+
+### Version branches
+
+`main` always tracks the newest extension version the signatures were verified against. Every version that `main` moves off keeps its own branch, so an older extension stays usable:
+
+| Branch | Extension |
+|---|---|
+| `main` | 2.1.222 (also verified against 2.1.221) |
+| `v2.1.220` | 2.1.220 |
+
+When adapting to a new release: branch the current `main` as `v<old-version>`, then bump `package.json`, this README and [docs/internals.md](docs/internals.md) on `main`.
 
 ## Diagnostics
 
