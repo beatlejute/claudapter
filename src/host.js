@@ -15,13 +15,22 @@ const ICONS_DIR = path.join(DIR, 'icons');
 const BINDINGS_FILE = path.join(DIR, 'bindings.json');
 const ICON_EXTENSIONS = ['png', 'svg'];
 
+// Several versions linger on disk after an update, so compare version numbers, not names
+function versionOf(dirName) {
+    const m = dirName.match(/anthropic\.claude-code-(\d+)\.(\d+)\.(\d+)/);
+    return m ? [+m[1], +m[2], +m[3]] : [0, 0, 0];
+}
+
 function defaultIcon() {
     const root = path.join(HOME, '.vscode', 'extensions');
     try {
         const dir = fs
             .readdirSync(root)
             .filter((d) => d.startsWith('anthropic.claude-code-'))
-            .sort()
+            .sort((a, b) => {
+                const [x, y] = [versionOf(a), versionOf(b)];
+                return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+            })
             .pop();
         if (!dir) return null;
         const icon = path.join(root, dir, 'resources', 'claude-logo.svg');

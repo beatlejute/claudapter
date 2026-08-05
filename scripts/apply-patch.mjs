@@ -23,9 +23,15 @@ const PATCHES = [
         where: 'after',
     },
     {
+        // The minifier renames these locals on nearly every release (2.1.220: `f.env=w,g)`, 2.1.221+: `f.env=x,_)`),
+        // so the signature is structural — the options object, the resolved env and the node path come out of the match.
+        // The resume id is read off the options object (`resume:t`) instead of the parameter, which is renamed too.
         file: 'extension.js',
-        find: 'f.env=w,g)',
-        replace: 'f.env=(()=>{try{' + HOST_REQUIRE + 'return require(__p).envFor(w,t)}catch(__e){return w}})(),g)',
+        find: /(\w+)\.pathToClaudeCodeExecutable=(\w+),\1\.executableArgs=(\w+),\1\.env=(\w+),(\w+)\)/,
+        replace: (_found, opts, bin, args, env, nodePath) =>
+            `${opts}.pathToClaudeCodeExecutable=${bin},${opts}.executableArgs=${args},${opts}.env=(()=>{try{` +
+            HOST_REQUIRE +
+            `return require(__p).envFor(${env},${opts}.resume)}catch(__e){return ${env}}})(),${nodePath})`,
         where: 'replace',
     },
     {
@@ -45,13 +51,30 @@ const PATCHES = [
 
 const MARKER = '__ccx';
 
+function versionOf(dirName) {
+    const m = dirName.match(/anthropic\.claude-code-(\d+)\.(\d+)\.(\d+)/);
+    return m ? [+m[1], +m[2], +m[3]] : [0, 0, 0];
+}
+
+// Old versions linger on disk after an update, so pick by version number rather than by name —
+// "2.1.99" sorts above "2.1.222" lexically. Folders VS Code has already retired are skipped.
 function findExtensionDir() {
     const argDir = process.argv.find((a) => a.startsWith('--dir='));
     if (argDir) return argDir.slice('--dir='.length);
     const root = path.join(homedir(), '.vscode', 'extensions');
-    const dirs = readdirSync(root).filter((d) => d.startsWith('anthropic.claude-code-'));
+    let obsolete = {};
+    try {
+        obsolete = JSON.parse(readFileSync(path.join(root, '.obsolete'), 'utf8')) || {};
+    } catch {}
+    const all = readdirSync(root).filter((d) => d.startsWith('anthropic.claude-code-'));
+    const dirs = all.filter((d) => !obsolete[d]);
     if (!dirs.length) throw Error(`Claude Code extension not found in ${root}`);
-    return path.join(root, dirs.sort().at(-1));
+    const newest = dirs.sort((a, b) => {
+        const [x, y] = [versionOf(a), versionOf(b)];
+        return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+    }).at(-1);
+    if (all.length > 1) console.log(`(${all.length} versions on disk, using the newest active one)`);
+    return path.join(root, newest);
 }
 
 // Project version mirrors the extension version the signatures were verified against
@@ -78,6 +101,21 @@ function restore(dir) {
     console.log(n ? `Restored ${n} file(s) from backup.` : 'Nothing to restore.');
 }
 
+// A signature is either a literal string or a RegExp, for the spots where the minifier renames locals
+function countHits(src, find) {
+    if (typeof find === 'string') return src.split(find).length - 1;
+    const flags = find.flags.includes('g') ? find.flags : find.flags + 'g';
+    return (src.match(new RegExp(find.source, flags)) || []).length;
+}
+
+// Replacing through a function keeps `$` sequences in the injected code literal
+function expand(patch, match) {
+    const [found] = match;
+    if (patch.where === 'before') return patch.insert + found;
+    if (patch.where === 'after') return found + patch.insert;
+    return typeof patch.replace === 'function' ? patch.replace(...match) : patch.replace;
+}
+
 function apply(dir) {
     const byFile = new Map();
     for (const p of PATCHES) {
@@ -92,11 +130,9 @@ function apply(dir) {
 
         let src = readFileSync(backupPath(file), 'utf8');
         for (const p of patches) {
-            const hits = src.split(p.find).length - 1;
+            const hits = countHits(src, p.find);
             if (hits !== 1) throw Error(`${rel}: signature matched ${hits} times — bundle changed:\n  ${p.find}`);
-            const replacement =
-                p.where === 'replace' ? p.replace : p.where === 'before' ? p.insert + p.find : p.find + p.insert;
-            src = src.replace(p.find, replacement);
+            src = src.replace(p.find, (...match) => expand(p, match));
         }
         writeFileSync(file, src, 'utf8');
         checkSyntax(file);
