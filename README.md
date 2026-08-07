@@ -1,7 +1,7 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.222**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.224**.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -34,7 +34,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.222**; the signatures also match 2.1.221)
+- The `anthropic.claude-code` extension installed (verified against **2.1.224**; the signatures also match 2.1.220–2.1.223)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
@@ -216,12 +216,14 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 
 | Branch | Extension | Injection point #3 |
 |---|---|---|
-| `main` | 2.1.222 — newest | structural match |
-| `v2.1.222` | 2.1.222 | structural match |
-| `v2.1.221` | 2.1.221 | structural match |
+| `main` | 2.1.224 — newest | structural match |
+| `v2.1.224` | 2.1.224 | structural match, `f.env=b,g)` |
+| `v2.1.223` | 2.1.223 | structural match, `f.env=x,_)` |
+| `v2.1.222` | 2.1.222 | structural match, `f.env=x,_)` |
+| `v2.1.221` | 2.1.221 | structural match, `f.env=x,_)` |
 | `v2.1.220` | 2.1.220 | literal `f.env=w,g)` |
 
-One commit can serve several versions: since injection point #3 stopped depending on minified names, the same code covers 2.1.221 and 2.1.222, so both branches point at it.
+One commit can serve several versions: since injection point #3 stopped depending on minified names, the same code covers everything from 2.1.221 on, and each branch differs from `main` only by its version stamp. 2.1.224 is what makes that worth the trouble — the minifier moved the locals again (`f.env=x,_)` → `f.env=b,g)`) and no signature had to change.
 
 When adapting to a new release: verify the signatures against it, bump `package.json`, this README and [docs/internals.md](docs/internals.md) on `main`, then tag the result with a fresh `v<version>` branch.
 

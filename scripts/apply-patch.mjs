@@ -23,8 +23,9 @@ const PATCHES = [
         where: 'after',
     },
     {
-        // The minifier renames these locals on nearly every release (2.1.220: `f.env=w,g)`, 2.1.221+: `f.env=x,_)`),
-        // so the signature is structural — the options object, the resolved env and the node path come out of the match.
+        // The minifier renames these locals on nearly every release (2.1.220: `f.env=w,g)`, 2.1.221–2.1.223:
+        // `f.env=x,_)`, 2.1.224: `f.env=b,g)`), so the signature is structural — the options object, the
+        // resolved env and the node path come out of the match.
         // The resume id is read off the options object (`resume:t`) instead of the parameter, which is renamed too.
         file: 'extension.js',
         find: /(\w+)\.pathToClaudeCodeExecutable=(\w+),\1\.executableArgs=(\w+),\1\.env=(\w+),(\w+)\)/,
