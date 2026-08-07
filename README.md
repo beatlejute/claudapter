@@ -1,7 +1,8 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.224**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.223**.
+> This is the `v2.1.223` branch — `main` carries the same code stamped for 2.1.224.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -34,7 +35,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.224**; the signatures also match 2.1.220–2.1.223)
+- The `anthropic.claude-code` extension installed (verified against **2.1.223**; the signatures also match 2.1.220–2.1.224)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
