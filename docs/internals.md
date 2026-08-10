@@ -1,12 +1,12 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.224** (`anthropic.claude-code-2.1.224-win32-x64`). Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 124,056 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.226** (`anthropic.claude-code-2.1.226-win32-x64`). Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 124,536 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
 | File | Size | What it is |
 |---|---:|---|
-| `resources/native-binary/claude.exe` | 272 MB | the CLI itself — bun standalone + Authenticode |
+| `resources/native-binary/claude.exe` | 274 MB | the CLI itself — bun standalone + Authenticode |
 | `webview/index.js` | 4.6 MB | UI: React 18.3.1, marked, parts of monaco |
 | `extension.js` | 2.4 MB | the extension host (bun bundle) |
 | `webview/index.css` | 371 KB | UI styles |
@@ -14,22 +14,22 @@ A teardown of version **2.1.224** (`anthropic.claude-code-2.1.224-win32-x64`). E
 
 ## Two activation paths
 
-`activate()` (`xVt`, line 123644) brings up two independent things:
+`activate()` (`l3t`, line 124134) brings up two independent things:
 
-1. **Native UI** — the webview/session manager (class `z4`, line 120294): providers `claudeVSCodeSidebar`, `…SidebarSecondary`, `claudeVSCodeSessionsList`, the `claudeVSCodePanel` panel, 23 contributed commands, a status bar item, and the `_claude_vscode_fs_left/right/readonly` FS providers used for diffs.
-2. **IDE MCP server** (tool registration `Uxe`, line 123275; listener `Mxe`, line 123553 — lines 123275–123587) — what a terminal-launched CLI talks to: HTTP+WebSocket on `127.0.0.1`, authorization via the `x-claude-code-ide-authorization` header (a random UUID), a lock file and the `CLAUDE_CODE_SSE_PORT` handoff.
+1. **Native UI** — the webview/session manager (class `cG`, line 120736): providers `claudeVSCodeSidebar`, `…SidebarSecondary`, `claudeVSCodeSessionsList`, the `claudeVSCodePanel` panel, 23 contributed commands, a status bar item, and the `_claude_vscode_fs_left/right/readonly` FS providers used for diffs.
+2. **IDE MCP server** (tool registration `pEe`, line 123765; listener `fEe`, line 124043 — lines 123765–124077) — what a terminal-launched CLI talks to: HTTP+WebSocket on `127.0.0.1`, authorization via the `x-claude-code-ide-authorization` header (a random UUID), a lock file and the `CLAUDE_CODE_SSE_PORT` handoff.
 
 MCP server tools: `openDiff`, `getDiagnostics`, `close_tab`, `closeAllDiffTabs`, `openFile`, `getOpenEditors`, `getWorkspaceFolders`, `getCurrentSelection`, `getLatestSelection`, `checkDocumentDirty`, `saveDocument`, `executeCode` (Jupyter). Notifications: `diagnostics_changed`, `log_event`.
 
 ## How Claude is launched
 
-The extension embeds **Claude Agent SDK 0.3.224** (the same version published on npm as `@anthropic-ai/claude-agent-sdk`) and calls `query()` with a transport pointing at `claude.exe`:
+The extension embeds **Claude Agent SDK 0.3.226** (the same version published on npm as `@anthropic-ai/claude-agent-sdk`) and calls `query()` with a transport pointing at `claude.exe`:
 
 ```
 --output-format stream-json --verbose --input-format stream-json
 ```
 
-`spawnClaude` (line 118881, in class `go` at line 118640) assembles the options:
+`spawnClaude` (line 119335, in class `_o` at line 119075) assembles the options:
 
 - `systemPrompt: { type: "preset", preset: "claude_code", append: … }`
 - `settingSources: ["user", "project", "local"]`
@@ -38,21 +38,22 @@ The extension embeds **Claude Agent SDK 0.3.224** (the same version published on
 - `extraArgs: { debug, debug-to-stderr, enable-auth-status, no-chrome, replay-user-messages }`
 - env: `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, `MCP_CONNECTION_NONBLOCKING=true`, `CLAUDE_CODE_ENABLE_TASKS=0`
 
-The environment comes from `$p()` (line 120230): `process.env` plus the `claudeCode.environmentVariables` setting. **It is frozen at spawn time** — a provider cannot be swapped inside a live process, the channel has to restart.
+The environment comes from `$p()` (line 120702): `process.env` plus the `claudeCode.environmentVariables` setting. **It is frozen at spawn time** — a provider cannot be swapped inside a live process, the channel has to restart.
 
-The assignment, minified, is injection point #3 (line 118958 formatted):
+The assignment, minified, is injection point #3 (line 119413 formatted):
 
 ```js
-if(f.pathToClaudeCodeExecutable=m,f.executableArgs=h,f.env=b,g)f.executable=g;
+if(f.pathToClaudeCodeExecutable=m,f.executableArgs=h,f.env=x,g)f.executable=g;
 ```
 
-Every identifier there is a minified local, and the minifier reshuffles them release to release — three different spellings in five releases:
+Every identifier there is a minified local, and the minifier reshuffles them release to release — four different spellings across six releases:
 
 | Release | Assignment |
 |---|---|
 | 2.1.220 | `f.env=w,g)` |
 | 2.1.221–2.1.223 | `f.env=x,_)` |
 | 2.1.224 | `f.env=b,g)` |
+| 2.1.226 | `f.env=x,g)` |
 
 A literal signature therefore breaks on almost every update; matching the shape instead survives it:
 
@@ -64,7 +65,7 @@ The back-reference pins all three assignments to the same options object, and th
 
 ## The webview ↔ host protocol
 
-Request/response with a `channelId`; dispatch lives in `processRequest` on the base class `CB` (line 108002) with roughly 90 message types, and the session class `go` overrides it (line 118809) for the handful it handles itself. The host sends `{type:"from-extension", message}` to the UI; the process stream arrives as `{type:"io_message", channelId, message, done}`.
+Request/response with a `channelId`; dispatch lives in `processRequest` on the base class `zB` (line 108318) with roughly 90 message types, and the session class `_o` overrides it (line 119263) for the handful it handles itself. The host sends `{type:"from-extension", message}` to the UI; the process stream arrives as `{type:"io_message", channelId, message, done}`.
 
 Messages from the webview that matter to a patcher:
 
@@ -81,7 +82,7 @@ Messages from the webview that matter to a patcher:
 
 ### `rename_tab` overwrites the icon
 
-The handler (line 118834) **unconditionally** rewrites both title and icon:
+The handler (line 119288) **unconditionally** rewrites both title and icon:
 
 ```js
 this.panelTab.title = e.request.title;
@@ -98,9 +99,15 @@ The two indicator variants are just the logo with a hole punched in the corner a
 
 The state the extension last asked for is remembered on the panel (`__ccxIconState`), because `decorate()` also repaints the icon on profile changes and would otherwise reset the indicator.
 
+The hook is installed at the first `iconPath` assignment in `setupPanel` (line 121083) — injection point #2. It carries the same minified-name problem as #3, and 2.1.226 is where it bit: `light:a,dark:a` became `light:s,dark:s` and the literal signature stopped matching. The structural form anchors on the shape and on the `.webview.options=` that always follows, which is also what keeps the panel variable available — the injected call needs that one name:
+
+```js
+/(\w+)\.iconPath=\{light:(\w+),dark:\2\},(\1\.webview\.options=)/
+```
+
 ### An existing session's panel cannot be reopened
 
-`createPanel` (line 120547):
+`createPanel` (line 121025):
 
 ```js
 createPanel(e, t, r) {
@@ -116,7 +123,7 @@ createPanel(e, t, r) {
     }
 ```
 
-So `claude-vscode.editor.open` with a live `sessionId` only reveals the existing panel, and any prompt handed to it is dropped with a notice. The panel's `onDidDispose` (line 120667) does drop the entry from `sessionPanels`, so a *closed* session reopens cleanly — but there is no path that gives you a second panel on a session that is still open. The working approach for a provider switch is to restart the channel, not the panel.
+So `claude-vscode.editor.open` with a live `sessionId` only reveals the existing panel, and any prompt handed to it is dropped with a notice. The panel's `onDidDispose` (line 121152) does drop the entry from `sessionPanels`, so a *closed* session reopens cleanly — but there is no path that gives you a second panel on a session that is still open. The working approach for a provider switch is to restart the channel, not the panel.
 
 ### Channel shutdown is asynchronous
 
@@ -124,7 +131,7 @@ So `claude-vscode.editor.open` with a live `sessionId` only reveals the existing
 
 ### Menu ordering
 
-The command registry (`class UG` in `webview/index.js`) sorts each section by a hard-coded id list; unknown ids fall to the end:
+The command registry (`class ZG` in `webview/index.js`) sorts each section by a hard-coded id list; unknown ids fall to the end:
 
 ```js
 if (t === "Model") {
@@ -173,7 +180,7 @@ needed no sixth injection point.
 
 ### CSP and loading your own script
 
-`getHtmlForWebview` (line 120765) emits `script-src 'nonce-…'` (line 120796), and `localResourceRoots` is limited to the `webview/` and `resources/` directories inside the extension. An external file cannot be referenced by URI — hence the custom code is inlined into the HTML with their nonce, while the text itself is read from disk when the page is generated (so edits apply without re-patching).
+`getHtmlForWebview` (line 121255) emits `script-src 'nonce-…'` (line 121286), and `localResourceRoots` is limited to the `webview/` and `resources/` directories inside the extension. An external file cannot be referenced by URI — hence the custom code is inlined into the HTML with their nonce, while the text itself is read from disk when the page is generated (so edits apply without re-patching).
 
 Execution order: their inline flag script → our classic script → their bundle (`type="module"`, deferred). That lets our code call `acquireVsCodeApi()` first and replace the global with a proxy that sees every outgoing message. Unknown types are ignored by the UI — its listener only reacts to `type === "from-extension"`.
 
@@ -195,7 +202,7 @@ The API surface an adapter actually has to cover (by occurrence count in the bun
 | Surface | Occurrences | Note |
 |---|---:|---|
 | `v1/messages` | 54 | the main endpoint, SSE |
-| `tool_use` | 1183 | without tools the CLI is useless |
+| `tool_use` | 1184 | without tools the CLI is useless |
 | `cache_control` | 81 | strip it: OpenAI caching is implicit |
 | `/v1/messages/count_tokens` | 12 | needed for the context indicator |
 | `thinking_delta` | 11 | not reproducible across the bridge |
@@ -278,6 +285,6 @@ Both formats collapse into the same Anthropic events: `message_start` → `conte
 
 ## Native binary
 
-`claude.exe` is a bun standalone executable (284,981,920 bytes): `/$bunfs/root/` and `B:/~BUN/root/` markers, the `---- Bun! ----` trailer at offset 284,971,474, followed by ~10 KB of Authenticode signature. The CLI's JS bundle sits there **in the clear**: a contiguous UTF-8 region at `254,695,584..278,436,039` (22.64 MB) starting with `// @bun @bytecode @bun-cjs (function(exports, require, module, …)`. Two much smaller bundles of the same shape follow it at `278,436,072` and `278,438,274` — the loaders for `image-processor.node` and `audio-capture.node`.
+`claude.exe` is a bun standalone executable (287,053,472 bytes): `/$bunfs/root/` and `B:/~BUN/root/` markers, the `---- Bun! ----` trailer at offset 287,042,825, followed by ~10 KB of Authenticode signature. The CLI's JS bundle sits there **in the clear**: a contiguous UTF-8 region at `256,475,720..280,507,390` (22.92 MB) starting with `// @bun @bytecode @bun-cjs (function(exports, require, module, …)`. Two much smaller bundles of the same shape follow it at `280,507,423` and `280,509,625` — the loaders for `image-processor.node` and `audio-capture.node`.
 
 Offsets move on every release; locating the region by scanning forward from the `// @bun @bytecode @bun-cjs` marker while the bytes stay valid UTF-8 text is what actually survives an update.

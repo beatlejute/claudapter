@@ -17,15 +17,21 @@ const PATCHES = [
         where: 'before',
     },
     {
+        // Same story as #3: the icon local is renamed too (2.1.220–2.1.224 `light:a,dark:a`, 2.1.226 `light:s,dark:s`).
+        // Anchoring on the shape — and on the `.webview.options=` that always follows — keeps the panel variable
+        // available for the call, which is the one name the injected code actually needs.
         file: 'extension.js',
-        find: 'e.iconPath={light:a,dark:a},',
-        insert: '(()=>{try{' + HOST_REQUIRE + 'require(__p).attachPanel(e)}catch(__e){}})(),',
-        where: 'after',
+        find: /(\w+)\.iconPath=\{light:(\w+),dark:\2\},(\1\.webview\.options=)/,
+        replace: (_found, panel, icon, tail) =>
+            `${panel}.iconPath={light:${icon},dark:${icon}},(()=>{try{` +
+            HOST_REQUIRE +
+            `require(__p).attachPanel(${panel})}catch(__e){}})(),${tail}`,
+        where: 'replace',
     },
     {
         // The minifier renames these locals on nearly every release (2.1.220: `f.env=w,g)`, 2.1.221–2.1.223:
-        // `f.env=x,_)`, 2.1.224: `f.env=b,g)`), so the signature is structural — the options object, the
-        // resolved env and the node path come out of the match.
+        // `f.env=x,_)`, 2.1.224: `f.env=b,g)`, 2.1.226: `f.env=x,g)`), so the signature is structural — the
+        // options object, the resolved env and the node path come out of the match.
         // The resume id is read off the options object (`resume:t`) instead of the parameter, which is renamed too.
         file: 'extension.js',
         find: /(\w+)\.pathToClaudeCodeExecutable=(\w+),\1\.executableArgs=(\w+),\1\.env=(\w+),(\w+)\)/,
