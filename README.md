@@ -1,7 +1,7 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.224**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.226**.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -34,7 +34,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.224**; the signatures also match 2.1.220–2.1.223)
+- The `anthropic.claude-code` extension installed (verified against **2.1.226**; the signatures also match 2.1.220–2.1.224)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
@@ -181,7 +181,7 @@ VS Code extension host                     webview (UI)
 | # | File | Anchor | Purpose |
 |---|---|---|---|
 | 1 | `extension.js` | `<script nonce="${u}" src="${a}" type="module">` | inline `webview.js` with their nonce + the `ccx:*` channel |
-| 2 | `extension.js` | `e.iconPath={light:a,dark:a},` in `setupPanel` | intercept the tab icon |
+| 2 | `extension.js` | `…iconPath={light:…,dark:…},….webview.options=` in `setupPanel` | intercept the tab icon |
 | 3 | `extension.js` | `…pathToClaudeCodeExecutable=…,…env=…)` in `spawnClaude` | **substitute `ANTHROPIC_*` when the process starts** |
 | 4 | `webview/index.js` | `n.commandRegistry.registerAction({id:"model"` | access their command registry and jsx factory |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
@@ -214,16 +214,17 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 
 `main` always tracks the newest extension version the signatures were verified against. Every supported version also has its own `v<version>` branch pointing at the last commit that works with it, so an older extension stays usable — check out the branch that matches your install:
 
-| Branch | Extension | Injection point #3 |
+| Branch | Extension | What the minifier called the locals |
 |---|---|---|
-| `main` | 2.1.224 — newest | structural match |
-| `v2.1.224` | 2.1.224 | structural match, `f.env=b,g)` |
-| `v2.1.223` | 2.1.223 | structural match, `f.env=x,_)` |
-| `v2.1.222` | 2.1.222 | structural match, `f.env=x,_)` |
-| `v2.1.221` | 2.1.221 | structural match, `f.env=x,_)` |
-| `v2.1.220` | 2.1.220 | literal `f.env=w,g)` |
+| `main` | 2.1.226 — newest | `f.env=x,g)`, `light:s,dark:s` |
+| `v2.1.226` | 2.1.226 | `f.env=x,g)`, `light:s,dark:s` |
+| `v2.1.224` | 2.1.224 | `f.env=b,g)`, `light:a,dark:a` |
+| `v2.1.223` | 2.1.223 | `f.env=x,_)`, `light:a,dark:a` |
+| `v2.1.222` | 2.1.222 | `f.env=x,_)`, `light:a,dark:a` |
+| `v2.1.221` | 2.1.221 | `f.env=x,_)`, `light:a,dark:a` |
+| `v2.1.220` | 2.1.220 | `f.env=w,g)`, `light:a,dark:a` |
 
-One commit can serve several versions: since injection point #3 stopped depending on minified names, the same code covers everything from 2.1.221 on, and each branch differs from `main` only by its version stamp. 2.1.224 is what makes that worth the trouble — the minifier moved the locals again (`f.env=x,_)` → `f.env=b,g)`) and no signature had to change.
+One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. The column above is what those names actually were: five spellings across seven releases, none of which required a signature change. Both structural signatures are re-checked against every bundle in the table on each update.
 
 When adapting to a new release: verify the signatures against it, bump `package.json`, this README and [docs/internals.md](docs/internals.md) on `main`, then tag the result with a fresh `v<version>` branch.
 
