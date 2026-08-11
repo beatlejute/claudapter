@@ -56,6 +56,7 @@ const S = (globalThis.__ccxState ||= {
     pendingProfile: null,
     badges: new Map(),
     iconUris: new Map(),
+    warnedOverrides: new Set(),
 });
 
 const LOG_FILE = path.join(DIR, 'debug.log');
@@ -158,6 +159,33 @@ function managedKeys() {
     return keys;
 }
 
+// Credentials and routing that must never cross a provider change. The union of profile keys is
+// not enough: a key nobody declares is a key nobody deletes, so an ANTHROPIC_API_KEY sitting in the
+// ambient environment would ride along to DeepSeek or GLM. The CLI resolves auth first-match-wins
+// (ANTHROPIC_API_KEY before ANTHROPIC_AUTH_TOKEN) and rejects requests carrying both, so a leftover
+// key does not just leak — it also breaks the profile's own auth.
+const CREDENTIAL_KEYS = [
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_CUSTOM_HEADERS',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+];
+
+// True when the profile brings its own routing or credentials, and the ambient ones must therefore go.
+// Keying this on ANTHROPIC_BASE_URL alone would miss two real shapes: a profile that only overrides
+// ANTHROPIC_AUTH_TOKEN (same endpoint, different account) and one that flips CLAUDE_CODE_USE_BEDROCK
+// or _USE_VERTEX. In both, a leftover ANTHROPIC_API_KEY still wins — the CLI reads it first.
+//
+// A profile with an empty env means "the Anthropic subscription": it declares none of these, so
+// nothing is stripped and it keeps inheriting exactly what the user already had.
+function crossesProvider(profile) {
+    const env = profileEnv(profile);
+    return CREDENTIAL_KEYS.some((k) => k in env);
+}
+
 const PROXY_SCRIPT = path.join(DIR, 'proxy', 'server.mjs');
 
 function localProxyPort(profile) {
@@ -208,6 +236,7 @@ function envFor(baseEnv, resumeSessionId) {
     if (!profile) return baseEnv;
     const env = { ...baseEnv };
     for (const k of managedKeys()) delete env[k];
+    if (crossesProvider(profile)) for (const k of CREDENTIAL_KEYS) delete env[k];
     Object.assign(env, profileEnv(profile));
 
     // Local adapter: without this the CLI routes even 127.0.0.1 through the corporate proxy and cannot connect
@@ -219,6 +248,33 @@ function envFor(baseEnv, resumeSessionId) {
     dlog('envFor', { profile, session: resumeSessionId || 'new', baseUrl: profileEnv(profile).ANTHROPIC_BASE_URL });
     console.log(`ccx: spawning with profile "${profile}" (session ${resumeSessionId || 'new'})`);
     return env;
+}
+
+// The CLI layers ~/.claude/settings.json's `env` block on top of the spawn environment. Its own
+// filter would strip provider keys, but only for hosts it treats as managed — the list is
+// ["claude-desktop","claude-desktop-3p","local-agent"] and "claude-vscode" is not in it. So whatever
+// is left in that block silently outranks the per-tab profile, which is exactly the hand-editing
+// this project exists to replace. Warn instead of editing: settings.json is the user's file and
+// claudapter never writes to it.
+function warnSettingsOverride(profile) {
+    const settings = currentEnv();
+    const wanted = profileEnv(profile);
+    // Coerced, because settings.json is hand-written JSON and a number or boolean there means the same
+    // thing as its string form once it reaches process.env — warning about that would be pure noise.
+    const conflicting = Object.keys(settings).filter((k) =>
+        k in wanted ? String(settings[k]) !== String(wanted[k]) : CREDENTIAL_KEYS.includes(k),
+    );
+    if (!conflicting.length) return;
+
+    const stamp = `${profile}:${conflicting.slice().sort().join(',')}`;
+    if (S.warnedOverrides.has(stamp)) return;
+    S.warnedOverrides.add(stamp);
+    dlog('settings override', { profile, keys: conflicting });
+    vscode.window.showWarningMessage(
+        `~/.claude/settings.json sets ${conflicting.join(', ')}. Claude Code applies that on top of ` +
+            `the spawn environment, so it overrides the "${profile}" profile in every tab. ` +
+            `Remove those keys from settings.json for per-tab switching to take effect.`,
+    );
 }
 
 function panelProfile(panel) {
@@ -511,11 +567,18 @@ function panelFor(webview) {
     return null;
 }
 
-function noteSessionId(webview, sessionId) {
+// `weak` marks an id lifted out of a request envelope rather than out of this tab's own channel.
+// Those ids are not reliably the active session, so they may only fill a gap — never overwrite an id
+// the channel gave us, and never create a binding. Getting that wrong writes a profile against a
+// session the user never switched, and the wrong provider then sticks to it.
+function noteSessionId(webview, sessionId, weak = false) {
     if (!sessionId || webview.__ccxSessionId === sessionId) return;
+    if (weak && webview.__ccxSessionId) return;
     webview.__ccxSessionId = sessionId;
+    // Remembered so a later ccx:apply does not bind against an id only a weak source ever confirmed
+    webview.__ccxSessionWeak = weak;
     const forTab = S.profileByWebview.get(webview);
-    if (forTab) setBinding(sessionId, forTab);
+    if (forTab && !weak) setBinding(sessionId, forTab);
     const panel = panelFor(webview);
     if (panel) {
         S.activeSessionByPanel.set(panel, sessionId);
@@ -555,9 +618,12 @@ function attachWebview(webview) {
             if (S.pendingProfile) ensureProxy(S.pendingProfile);
             return;
         }
-        if (m.type === 'request' && m.request) {
+        // Only update_session_state is about the tab's own session; delete_session, rename_session and
+        // open_in_editor carry the id of whichever history row the user clicked. Even this one is emitted
+        // once more for the session that just STOPPED being active, so it counts as a weak source.
+        if (m.type === 'request' && m.request && m.request.type === 'update_session_state') {
             const id = m.request.sessionId;
-            if (id && typeof id === 'string') noteSessionId(webview, id);
+            if (id && typeof id === 'string') noteSessionId(webview, id, true);
         }
         if (!m.type.startsWith('ccx:')) return;
 
@@ -566,7 +632,9 @@ function attachWebview(webview) {
             postIcons(webview);
             post(webview, { type: 'ccx:state', ...stateFor(sessionId, webview) });
         } else if (m.type === 'ccx:session') {
+            // The webview tracks the active channel itself, so this id is authoritative
             webview.__ccxSessionId = m.sessionId || null;
+            webview.__ccxSessionWeak = false;
             const forTab = S.profileByWebview.get(webview);
             if (webview.__ccxSessionId && forTab) setBinding(webview.__ccxSessionId, forTab);
             for (const p of S.panels.keys())
@@ -580,12 +648,22 @@ function attachWebview(webview) {
             try {
                 S.profileByWebview.set(webview, name);
                 S.pendingProfile = name;
-                if (name) ensureProxy(name);
-                const known = webview.__ccxSessionId || sessionId;
+                if (name) {
+                    ensureProxy(name);
+                    warnSettingsOverride(name);
+                }
+                // m.sessionId comes from the webview's own channel bookkeeping, so it outranks an id
+                // only a weak source confirmed. With neither, the binding waits: profileByWebview is
+                // already set, so noteSessionId writes it as soon as the channel reports a real id.
+                //
+                // A weak id is never echoed back either — the webview adopts whatever it receives here
+                // as state.sessionId and resumes on it, so handing it a guess would reopen the wrong
+                // conversation. Sending null leaves it on its own per-channel record, which is right.
+                const known = (webview.__ccxSessionWeak ? null : webview.__ccxSessionId) || m.sessionId || null;
                 if (known) setBinding(known, name);
                 broadcast();
-                dlog('ccx:apply', { name, sessionId: known || null });
-                post(webview, { type: 'ccx:applied', sessionId: known || null, name });
+                dlog('ccx:apply', { name, sessionId: known, bound: Boolean(known) });
+                post(webview, { type: 'ccx:applied', sessionId: known, name });
             } catch (e) {
                 vscode.window.showErrorMessage(`Provider switch failed: ${e.message}`);
             }
