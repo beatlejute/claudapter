@@ -30,15 +30,21 @@ const PATCHES = [
     },
     {
         // The minifier renames these locals on nearly every release (2.1.220: `f.env=w,g)`, 2.1.221–2.1.223:
-        // `f.env=x,_)`, 2.1.224: `f.env=b,g)`, 2.1.226: `f.env=x,g)`), so the signature is structural — the
-        // options object, the resolved env and the node path come out of the match.
+        // `f.env=x,_)`, 2.1.224: `f.env=b,g)`, 2.1.226: `f.env=x,g)`, 2.1.227: `f.env=b;`), so the signature is
+        // structural — the options object and the resolved env come out of the match.
+        //
+        // 2.1.227 changed the shape, not just the names: dropping the bundled-node fallback removed `nodePath`
+        // from getClaudeBinary(), which took the whole `if(<comma-expr>,nodePath)f.executable=nodePath;` wrapper
+        // with it. So the terminator is captured whole and re-emitted verbatim — `,<nodePath>)` on 2.1.220–2.1.226
+        // keeps the enclosing `if(` arity intact, `;` on 2.1.227+ closes the bare statement.
+        //
         // The resume id is read off the options object (`resume:t`) instead of the parameter, which is renamed too.
         file: 'extension.js',
-        find: /(\w+)\.pathToClaudeCodeExecutable=(\w+),\1\.executableArgs=(\w+),\1\.env=(\w+),(\w+)\)/,
-        replace: (_found, opts, bin, args, env, nodePath) =>
+        find: /(\w+)\.pathToClaudeCodeExecutable=(\w+),\1\.executableArgs=(\w+),\1\.env=(\w+)(,\w+\)|;)/,
+        replace: (_found, opts, bin, args, env, tail) =>
             `${opts}.pathToClaudeCodeExecutable=${bin},${opts}.executableArgs=${args},${opts}.env=(()=>{try{` +
             HOST_REQUIRE +
-            `return require(__p).envFor(${env},${opts}.resume)}catch(__e){return ${env}}})(),${nodePath})`,
+            `return require(__p).envFor(${env},${opts}.resume)}catch(__e){return ${env}}})()${tail}`,
         where: 'replace',
     },
     {
