@@ -1,7 +1,7 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.227**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.228**.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -34,7 +34,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.227**; the signatures also match 2.1.220–2.1.226)
+- The `anthropic.claude-code` extension installed (verified against **2.1.228**; the signatures also match 2.1.220–2.1.227)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
@@ -216,7 +216,8 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 
 | Branch | Extension | What the minifier called the locals |
 |---|---|---|
-| `main` | 2.1.227 — newest | `f.env=b;`, `light:s,dark:s` |
+| `main` | 2.1.228 — newest | `f.env=v;`, `light:s,dark:s` |
+| `v2.1.228` | 2.1.228 | `f.env=v;`, `light:s,dark:s` |
 | `v2.1.227` | 2.1.227 | `f.env=b;`, `light:s,dark:s` |
 | `v2.1.226` | 2.1.226 | `f.env=x,g)`, `light:s,dark:s` |
 | `v2.1.224` | 2.1.224 | `f.env=b,g)`, `light:a,dark:a` |
@@ -225,7 +226,7 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 | `v2.1.221` | 2.1.221 | `f.env=x,_)`, `light:a,dark:a` |
 | `v2.1.220` | 2.1.220 | `f.env=w,g)`, `light:a,dark:a` |
 
-One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. Both structural signatures are re-checked against every bundle in the table on each update.
+One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. Both structural signatures are re-checked against every bundle still on disk at update time. VS Code garbage-collects retired extension folders, so the older ones eventually stop being verifiable locally — 2.1.220 through 2.1.226 were gone by the 2.1.228 update, leaving 2.1.227 and 2.1.228 as the sweep. Their branches stay pinned to the commit that was verified against them.
 
 Renames alone have never cost a signature change. 2.1.227 did, though — it dropped the bundled-node fallback, which deleted the `if(…)` wrapper around #3 and left the assignment ending in `;` instead of `,<nodePath>)`. The signature now captures that terminator and echoes it back verbatim, so one pattern still covers every release in the table.
 
