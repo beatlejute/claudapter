@@ -1,35 +1,35 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.228** (`anthropic.claude-code-2.1.228-win32-x64`). Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 139,914 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.229** (`anthropic.claude-code-2.1.229-win32-x64`). Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 142,644 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
 | File | Size | What it is |
 |---|---:|---|
-| `resources/native-binary/claude.exe` | 283 MB | the CLI itself — bun standalone + Authenticode |
+| `resources/native-binary/claude.exe` | 293 MB | the CLI itself — bun standalone + Authenticode |
 | `webview/index.js` | 4.7 MB | UI: React 18.3.1, marked, parts of monaco |
 | `extension.js` | 2.7 MB | the extension host (bun bundle) |
-| `webview/index.css` | 374 KB | UI styles |
+| `webview/index.css` | 377 KB | UI styles |
 | `resources/audio-capture/*/audio-capture.node` | 498 KB | native module for dictation |
 
 ## Two activation paths
 
-`activate()` (`vur`, line 139512) brings up two independent things:
+`activate()` (`emr`, line 142238) brings up two independent things:
 
-1. **Native UI** — the webview/session manager (class `F9`, line 136114): providers `claudeVSCodeSidebar`, `…SidebarSecondary`, `claudeVSCodeSessionsList`, the `claudeVSCodePanel` panel, 23 contributed commands, a status bar item, and the `_claude_vscode_fs_left/right/readonly` FS providers used for diffs.
-2. **IDE MCP server** (tool registration `iDe`, line 139143; listener `oDe`, line 139421 — lines 139143–139455) — what a terminal-launched CLI talks to: HTTP+WebSocket on `127.0.0.1`, authorization via the `x-claude-code-ide-authorization` header (a random UUID), a lock file and the `CLAUDE_CODE_SSE_PORT` handoff.
+1. **Native UI** — the webview/session manager (class `U5`, line 138831): providers `claudeVSCodeSidebar`, `…SidebarSecondary`, `claudeVSCodeSessionsList`, the `claudeVSCodePanel` panel, 23 contributed commands, a status bar item, and the `_claude_vscode_fs_left/right/readonly` FS providers used for diffs.
+2. **IDE MCP server** (tool registration `vNe`, line 141869; listener `yNe`, line 142147 — lines 141869–142181) — what a terminal-launched CLI talks to: HTTP+WebSocket on `127.0.0.1`, authorization via the `x-claude-code-ide-authorization` header (a random UUID), a lock file and the `CLAUDE_CODE_SSE_PORT` handoff.
 
 MCP server tools: `openDiff`, `getDiagnostics`, `close_tab`, `closeAllDiffTabs`, `openFile`, `getOpenEditors`, `getWorkspaceFolders`, `getCurrentSelection`, `getLatestSelection`, `checkDocumentDirty`, `saveDocument`, `executeCode` (Jupyter). Notifications: `diagnostics_changed`, `log_event`.
 
 ## How Claude is launched
 
-The extension embeds **Claude Agent SDK 0.3.228** (the same version published on npm as `@anthropic-ai/claude-agent-sdk`) and calls `query()` with a transport pointing at `claude.exe`:
+The extension embeds **Claude Agent SDK 0.3.229** (the same version published on npm as `@anthropic-ai/claude-agent-sdk`) and calls `query()` with a transport pointing at `claude.exe`:
 
 ```
 --output-format stream-json --verbose --input-format stream-json
 ```
 
-`spawnClaude` (line 134752, in class `ds` at line 134492) assembles the options:
+`spawnClaude` (line 137469, in class `fs` at line 137209) assembles the options:
 
 - `systemPrompt: { type: "preset", preset: "claude_code", append: … }`
 - `settingSources: ["user", "project", "local"]`
@@ -38,15 +38,15 @@ The extension embeds **Claude Agent SDK 0.3.228** (the same version published on
 - `extraArgs: { debug, debug-to-stderr, enable-auth-status, no-chrome, replay-user-messages }`
 - env: `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, `MCP_CONNECTION_NONBLOCKING=true`, `CLAUDE_CODE_ENABLE_TASKS=0`
 
-The environment comes from `Sm()` (line 136080): `process.env` plus the `claudeCode.environmentVariables` setting. **It is frozen at spawn time** — a provider cannot be swapped inside a live process, the channel has to restart.
+The environment comes from `Am()` (line 138797): `process.env` plus the `claudeCode.environmentVariables` setting. **It is frozen at spawn time** — a provider cannot be swapped inside a live process, the channel has to restart.
 
-The assignment, minified, is injection point #3 (line 134826 formatted):
+The assignment, minified, is injection point #3 (line 137543 formatted):
 
 ```js
 f.pathToClaudeCodeExecutable=m,f.executableArgs=h,f.env=v;
 ```
 
-Every identifier there is a minified local, and the minifier reshuffles them release to release — six spellings across eight releases:
+Every identifier there is a minified local, and the minifier reshuffles them release to release — six spellings across nine releases:
 
 | Release | Assignment | Terminator |
 |---|---|---|
@@ -56,6 +56,7 @@ Every identifier there is a minified local, and the minifier reshuffles them rel
 | 2.1.226 | `f.env=x,g)` | `,<nodePath>)` |
 | 2.1.227 | `f.env=b;` | `;` |
 | 2.1.228 | `f.env=v;` | `;` |
+| 2.1.229 | `f.env=v;` | `;` |
 
 2.1.227 is the one that changed the **shape**, not just the names. Up to 2.1.226 the three assignments were the condition of an `if`, with the node path as the last operand of the comma expression:
 
@@ -77,7 +78,7 @@ The back-reference pins all three assignments to the same options object, and th
 
 ## The webview ↔ host protocol
 
-Request/response with a `channelId`; dispatch lives in `processRequest` on the base class `TD` (line 123677, `processRequest` at 124712) with roughly 90 message types, and the session class `ds` overrides it (line 134680) for the handful it handles itself. The host sends `{type:"from-extension", message}` to the UI; the process stream arrives as `{type:"io_message", channelId, message, done}`.
+Request/response with a `channelId`; dispatch lives in `processRequest` on the base class `YD` (line 126360, `processRequest` at 127396) with roughly 90 message types, and the session class `fs` overrides it (line 137397) for the handful it handles itself. The host sends `{type:"from-extension", message}` to the UI; the process stream arrives as `{type:"io_message", channelId, message, done}`.
 
 Messages from the webview that matter to a patcher:
 
@@ -94,7 +95,7 @@ Messages from the webview that matter to a patcher:
 
 ### `rename_tab` overwrites the icon
 
-The handler (line 134705) **unconditionally** rewrites both title and icon:
+The handler (line 137422) **unconditionally** rewrites both title and icon:
 
 ```js
 this.panelTab.title = e.request.title;
@@ -111,7 +112,7 @@ The two indicator variants are just the logo with a hole punched in the corner a
 
 The state the extension last asked for is remembered on the panel (`__ccxIconState`), because `decorate()` also repaints the icon on profile changes and would otherwise reset the indicator.
 
-The hook is installed at the first `iconPath` assignment in `setupPanel` (line 136461) — injection point #2. It carries the same minified-name problem as #3, and 2.1.226 is where it bit: `light:a,dark:a` became `light:s,dark:s` and the literal signature stopped matching. The structural form anchors on the shape and on the `.webview.options=` that always follows, which is also what keeps the panel variable available — the injected call needs that one name:
+The hook is installed at the first `iconPath` assignment in `setupPanel` (line 139185) — injection point #2. It carries the same minified-name problem as #3, and 2.1.226 is where it bit: `light:a,dark:a` became `light:s,dark:s` and the literal signature stopped matching. The structural form anchors on the shape and on the `.webview.options=` that always follows, which is also what keeps the panel variable available — the injected call needs that one name:
 
 ```js
 /(\w+)\.iconPath=\{light:(\w+),dark:\2\},(\1\.webview\.options=)/
@@ -119,7 +120,7 @@ The hook is installed at the first `iconPath` assignment in `setupPanel` (line 1
 
 ### An existing session's panel cannot be reopened
 
-`createPanel` (line 136403):
+`createPanel` (line 139123):
 
 ```js
 createPanel(e, t, r) {
@@ -135,7 +136,7 @@ createPanel(e, t, r) {
     }
 ```
 
-So `claude-vscode.editor.open` with a live `sessionId` only reveals the existing panel, and any prompt handed to it is dropped with a notice. The panel's `onDidDispose` (line 136536) does drop the entry from `sessionPanels`, so a *closed* session reopens cleanly — but there is no path that gives you a second panel on a session that is still open. The working approach for a provider switch is to restart the channel, not the panel.
+So `claude-vscode.editor.open` with a live `sessionId` only reveals the existing panel, and any prompt handed to it is dropped with a notice. The panel's `onDidDispose` (line 139261) does drop the entry from `sessionPanels`, so a *closed* session reopens cleanly — but there is no path that gives you a second panel on a session that is still open. The working approach for a provider switch is to restart the channel, not the panel.
 
 ### Channel shutdown is asynchronous
 
@@ -155,21 +156,25 @@ function rj() { let e = J.CLAUDE_CODE_ENTRYPOINT; return e !== void 0 && bIc.has
 `env` block silently outranks the per-tab profile. `host.js` warns about that on a switch rather than
 editing the user's file.
 
-2.1.228 adds a **second** set that does contain `claude-vscode`, which looks at a glance like the gate
-opening up:
+The trap is that the bundle keeps growing *other* entrypoint sets, and three of them now do contain
+`claude-vscode`. By 2.1.229 there are four in total, and only the first is the settings filter:
 
-```js
-xFa = new Set(["claude-desktop", "local-agent", "claude-vscode"]);
-// …xFa.has(process.env.CLAUDE_CODE_ENTRYPOINT ?? "") … requestOAuthTokenRefresh()
-```
+| Set | Members | What it actually gates |
+|---|---|---|
+| `BLc` (`bIc` in 2.1.228) | desktop, desktop-3p, local-agent | **the settings.json env filter** — no `claude-vscode` |
+| `nRs` (`xFa` in 2.1.228) | desktop, local-agent, vscode | delegating OAuth token refresh to the host |
+| `AsS` — new in 2.1.229 | vscode, desktop, desktop-3p | deletes `CLAUDE_CODE_ENTRYPOINT` from a child env |
+| `t1_` — new in 2.1.229 | vscode | whether disabled models are listed in the picker |
 
-It is unrelated — that one decides whether OAuth token refresh is delegated to the host. `bIc` is
-still the settings filter and still excludes `claude-vscode`, so the warning stands. Worth knowing
-before grepping for `claude-desktop` and concluding the trap is gone.
+`AsS` is the dangerous lookalike: same three-member shape as `BLc`, two members in common, and it
+does include `claude-vscode`. It is a different function entirely. Resolve these by their *use site*,
+never by membership — grepping for `claude-desktop` and eyeballing the arrays gives the opposite
+answer. Through 2.1.229 the settings filter is still `BLc`, consulted via `wj()`, and still excludes
+`claude-vscode`, so the warning stands.
 
 ### Menu ordering
 
-The command registry (`class xX` in `webview/index.js`) sorts each section by a hard-coded id list; unknown ids fall to the end:
+The command registry (`class RX` in `webview/index.js`) sorts each section by a hard-coded id list; unknown ids fall to the end:
 
 ```js
 if (t === "Model") {
@@ -218,7 +223,7 @@ needed no sixth injection point.
 
 ### CSP and loading your own script
 
-`getHtmlForWebview` (line 136633) emits `script-src 'nonce-…'` (line 136664), and `localResourceRoots` is limited to the `webview/` and `resources/` directories inside the extension. An external file cannot be referenced by URI — hence the custom code is inlined into the HTML with their nonce, while the text itself is read from disk when the page is generated (so edits apply without re-patching).
+`getHtmlForWebview` (line 139359) emits `script-src 'nonce-…'` (line 139390), and `localResourceRoots` is limited to the `webview/` and `resources/` directories inside the extension. An external file cannot be referenced by URI — hence the custom code is inlined into the HTML with their nonce, while the text itself is read from disk when the page is generated (so edits apply without re-patching).
 
 Execution order: their inline flag script → our classic script → their bundle (`type="module"`, deferred). That lets our code call `acquireVsCodeApi()` first and replace the global with a proxy that sees every outgoing message. Unknown types are ignored by the UI — its listener only reacts to `type === "from-extension"`.
 
@@ -240,7 +245,7 @@ The API surface an adapter actually has to cover (by occurrence count in the bun
 | Surface | Occurrences | Note |
 |---|---:|---|
 | `v1/messages` | 64 | the main endpoint, SSE |
-| `tool_use` | 1221 | without tools the CLI is useless |
+| `tool_use` | 1219 | without tools the CLI is useless |
 | `cache_control` | 85 | strip it: OpenAI caching is implicit |
 | `/v1/messages/count_tokens` | 14 | needed for the context indicator |
 | `thinking_delta` | 15 | not reproducible across the bridge |
@@ -323,6 +328,6 @@ Both formats collapse into the same Anthropic events: `message_start` → `conte
 
 ## Native binary
 
-`claude.exe` is a bun standalone executable (296,308,896 bytes): `/$bunfs/root/` and `B:/~BUN/root/` markers, the `---- Bun! ----` trailer at offset 296,297,977, followed by ~10 KB of Authenticode signature. The CLI's JS bundle sits there **in the clear**: a contiguous UTF-8 region at `264,717,944..289,762,542` (23.88 MB) starting with `// @bun @bytecode @bun-cjs (function(exports, require, module, …)`. Two much smaller bundles of the same shape follow it at `289,762,575` and `289,764,777` — the loaders for `image-processor.node` and `audio-capture.node`.
+`claude.exe` is a bun standalone executable (307,186,848 bytes): `/$bunfs/root/` and `B:/~BUN/root/` markers, the `---- Bun! ----` trailer at offset 307,176,276, followed by ~10 KB of Authenticode signature. The CLI's JS bundle sits there **in the clear**: a contiguous UTF-8 region at `272,965,517..298,411,382` (24.27 MB) starting with `// @bun @bytecode @bun-cjs (function(exports, require, module, …)`. Two much smaller bundles of the same shape follow it at `298,411,415` and `298,413,617` — the loaders for `image-processor.node` and `audio-capture.node`.
 
 Offsets move on every release; locating the region by scanning forward from the `// @bun @bytecode @bun-cjs` marker while the bytes stay valid UTF-8 text is what actually survives an update.
