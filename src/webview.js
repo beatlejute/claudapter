@@ -357,6 +357,219 @@
         setTimeout(function () { bar.remove(); }, 6000);
     }
 
+    // --- Quote selection ---------------------------------------------------------------------
+    //
+    // VS Code draws the webview's Cut/Copy/Paste menu itself, and an extension can only add to it by
+    // contributing `menus."webview/context"` in the extension manifest. Patching an installed
+    // extension's package.json is not viable: the scanned manifest is cached against the mtime of
+    // extensions.json, so the edit either does nothing or trips the "Extensions have been modified
+    // on disk" error. What the page *can* do is pre-empt the menu entirely — VS Code's webview
+    // preload leads its own handler with `if (e.defaultPrevented) return;`, so calling
+    // preventDefault() means its menu is never even requested. That is the whole mechanism.
+    //
+    // It is used as narrowly as possible: only on a right-click inside a non-empty transcript
+    // selection. Everywhere else the stock menu is left alone, so Cut/Copy/Paste in the composer
+    // and everything outside the transcript keep working untouched.
+
+    var menu = null;
+    var selectionSnapshot = null;
+
+    // The composer's own glyphs are transparent (`color:#0000`) — what the user reads is a sibling
+    // mirror element React renders from state. Writing to the DOM without going through their input
+    // path therefore produces text that is not stale but *invisible*, so every insert below is an
+    // execCommand that fires their `oninput`.
+    function composerEl() {
+        return document.querySelector('[role="textbox"][aria-label="Message input"]');
+    }
+
+    // While a permission request is pending the app sets `display:none` on the composer's container.
+    // execCommand refuses to edit a hidden contenteditable and returns false, so the item must not be
+    // offered at all in that state — inserting "successfully" into an invisible box is worse.
+    function composerReady() {
+        var el = composerEl();
+        return el && el.offsetParent !== null ? el : null;
+    }
+
+    function fencedLanguage(node) {
+        var pre = node && node.nodeType === 1 ? node : node && node.parentElement;
+        pre = pre && pre.closest ? pre.closest('pre') : null;
+        if (!pre) return null;
+        var code = pre.querySelector('code');
+        var m = code && /(?:^|\s)language-([\w+-]+)/.exec(code.className || '');
+        return { lang: m ? m[1] : '' };
+    }
+
+    // Selected transcript text is rendered output, not the original markdown — links and emphasis are
+    // already flattened by the time it reaches us, and there is no reliable way back to the source.
+    // Quoting what the user actually sees is the honest reading of "quote selection". Code is the one
+    // case worth special-handling: a selection sitting inside a <pre> becomes a fence, because
+    // blockquoting code destroys it.
+    function quoteText(sel) {
+        var text = sel.toString().replace(/\r\n?/g, '\n').replace(/\s+$/, '');
+        if (!text) return '';
+
+        var fence = fencedLanguage(sel.anchorNode);
+        if (fence && fencedLanguage(sel.focusNode)) {
+            return '```' + fence.lang + '\n' + text + '\n```';
+        }
+        return text
+            .split('\n')
+            .map(function (line) {
+                var trimmed = line.replace(/\s+$/, '');
+                return trimmed ? '> ' + trimmed : '>';
+            })
+            .join('\n');
+    }
+
+    // One execCommand per line, with insertLineBreak between them. A single insertText carrying the
+    // newlines is what the app itself uses for @-mentions, but it splits a multi-line payload into
+    // <div> blocks and mangles the text; line-at-a-time lands it verbatim.
+    function insertIntoComposer(el, text) {
+        el.focus();
+        var lines = text.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+            if (i && !document.execCommand('insertLineBreak')) return false;
+            if (lines[i] && !document.execCommand('insertText', false, lines[i])) return false;
+        }
+        // A trailing break would leave the caret before it rather than after, so the blank line the
+        // user needs is inserted as the separator for whatever they type next.
+        return document.execCommand('insertLineBreak');
+    }
+
+    function closeMenu() {
+        if (menu) menu.remove();
+        menu = null;
+        window.removeEventListener('keydown', onMenuKey, true);
+        window.removeEventListener('scroll', closeMenu, true);
+        window.removeEventListener('blur', closeMenu, true);
+        document.removeEventListener('mousedown', onMenuOutside, true);
+    }
+
+    function onMenuKey(e) {
+        if (e.key === 'Escape') closeMenu();
+    }
+
+    function onMenuOutside(e) {
+        if (menu && !menu.contains(e.target)) closeMenu();
+    }
+
+    function menuItem(label, run) {
+        var row = document.createElement('div');
+        row.className = 'ccx-menu-item';
+        row.textContent = label;
+        row.onclick = function () {
+            closeMenu();
+            run();
+        };
+        return row;
+    }
+
+    function openMenu(x, y, items) {
+        closeMenu();
+        menu = document.createElement('div');
+        menu.className = 'ccx-menu';
+        // Without this the mousedown collapses the selection before the click handler reads it, and
+        // the highlight disappears from under the menu while it is open.
+        menu.onmousedown = function (e) { e.preventDefault(); };
+        items.forEach(function (item) { menu.appendChild(item); });
+
+        // Measure before showing, or the box paints once at the origin on its way to the cursor.
+        menu.style.visibility = 'hidden';
+        document.body.appendChild(menu);
+        var w = menu.offsetWidth;
+        var h = menu.offsetHeight;
+        menu.style.left = Math.max(4, Math.min(x, window.innerWidth - w - 4)) + 'px';
+        menu.style.top = Math.max(4, Math.min(y, window.innerHeight - h - 4)) + 'px';
+        menu.style.visibility = '';
+
+        window.addEventListener('keydown', onMenuKey, true);
+        window.addEventListener('scroll', closeMenu, true);
+        window.addEventListener('blur', closeMenu, true);
+        document.addEventListener('mousedown', onMenuOutside, true);
+    }
+
+    function rangeHasPoint(range, x, y) {
+        var rects = range.getClientRects();
+        for (var i = 0; i < rects.length; i++) {
+            var r = rects[i];
+            if (x >= r.left - 2 && x <= r.right + 2 && y >= r.top - 2 && y <= r.bottom + 2) return true;
+        }
+        return false;
+    }
+
+    // A right-click outside a selection collapses it before the contextmenu event, so the live
+    // selection alone cannot answer "did they click inside their selection". The snapshot is taken on
+    // the mousedown that precedes it — and is only trusted when the click actually landed on it,
+    // otherwise a click elsewhere would quote text the user had left behind.
+    function usableSelection(e) {
+        var sel = window.getSelection();
+        if (sel && !sel.isCollapsed && sel.toString().trim()) return sel;
+        if (selectionSnapshot && rangeHasPoint(selectionSnapshot, e.clientX, e.clientY)) {
+            var restored = window.getSelection();
+            restored.removeAllRanges();
+            restored.addRange(selectionSnapshot);
+            return restored;
+        }
+        return null;
+    }
+
+    function onContextMenu(e) {
+        try {
+            // Positive gate on the transcript container. Matching the CSS-module prefix is the same
+            // approach the session-list icons use; it fails closed — a renamed module means the item
+            // stops appearing, never that the app's own menus break.
+            if (!e.target.closest || !e.target.closest('[class*="messagesContainer_"]')) return;
+            // The app has its own menu on markdown links; leave that one to it.
+            if (e.target.closest('a[href]')) return;
+
+            var sel = usableSelection(e);
+            if (!sel) return;
+            var text = quoteText(sel);
+            if (!text) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            var items = [
+                menuItem('Quote selection', function () {
+                    var el = composerReady();
+                    if (!el) return toast('The composer is not available right now.');
+                    if (!insertIntoComposer(el, text)) toast('Could not insert the quote.');
+                }),
+                // preventDefault took the stock Copy away with the rest of the menu, so it comes back
+                // here. The webview iframe is granted clipboard-write, so this is the whole story.
+                menuItem('Copy', function () {
+                    navigator.clipboard.writeText(sel.toString()).catch(function () {
+                        toast('Could not copy the selection.');
+                    });
+                }),
+            ];
+            if (!composerReady()) items[0].classList.add('ccx-menu-disabled');
+            openMenu(e.clientX, e.clientY, items);
+        } catch (err) {
+            console.warn('ccx: context menu failed', err);
+        }
+    }
+
+    function watchSelection() {
+        document.addEventListener(
+            'mousedown',
+            function (e) {
+                if (e.button !== 2) {
+                    selectionSnapshot = null;
+                    return;
+                }
+                var sel = window.getSelection();
+                selectionSnapshot =
+                    sel && !sel.isCollapsed && sel.toString().trim() ? sel.getRangeAt(0).cloneRange() : null;
+            },
+            true,
+        );
+        // Capture phase: React binds its delegated listeners on #root, so this runs first, and
+        // stopPropagation() here also keeps VS Code's own window-level handler from seeing the event.
+        document.addEventListener('contextmenu', onContextMenu, true);
+    }
+
     function restartChannel(name) {
         var launch = launchByChannel[activeChannelId];
         var conn = ctx && ctx.comms && ctx.comms.connection && ctx.comms.connection.value;
@@ -425,10 +638,20 @@
         '.ccx-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:10001;display:flex;gap:8px;align-items:center;padding:8px 12px;border-radius:6px;font:12px var(--vscode-font-family);color:var(--vscode-notifications-foreground, var(--vscode-foreground));background:var(--vscode-notifications-background, var(--vscode-editorWidget-background));border:1px solid var(--vscode-notificationCenter-border, var(--vscode-widget-border));box-shadow:0 4px 16px rgba(0,0,0,.4)}',
         '.ccx-toast-btn{font:12px var(--vscode-font-family);padding:3px 10px;border-radius:4px;cursor:pointer;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:none}',
         '.ccx-toast-skip{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}',
+        // Above the app's own .previewOverlay (z-index 1e4) and claudapter's toast, since it is opened
+        // from a right-click that can land anywhere. Menu colours first, widget colours as the fallback.
+        '.ccx-menu{position:fixed;z-index:10002;min-width:160px;padding:4px;border-radius:5px;font:13px var(--vscode-font-family);color:var(--vscode-menu-foreground, var(--vscode-foreground));background:var(--vscode-menu-background, var(--vscode-editorWidget-background));border:1px solid var(--vscode-menu-border, var(--vscode-widget-border, var(--vscode-focusBorder)));box-shadow:0 2px 12px rgba(0,0,0,.4)}',
+        '.ccx-menu-item{padding:4px 22px 4px 10px;border-radius:3px;cursor:pointer;white-space:nowrap}',
+        '.ccx-menu-item:hover{color:var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground));background:var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground))}',
+        '.ccx-menu-disabled{opacity:.45;pointer-events:none}',
     ].join('');
     document.head.appendChild(s);
 
     send({ type: 'ccx:get' });
+    // Listeners go on `document`, which exists before <body> does, so this does not wait for the DOM.
+    // It also has to be registered before VS Code's preload hooks the frame, which is why the injected
+    // script is a classic inline <script> rather than a module.
+    watchSelection();
     if (document.body) {
         syncChip();
         decorateSessionList();

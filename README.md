@@ -29,6 +29,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
 - **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
+- **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
 
 ## Requirements
@@ -185,6 +186,23 @@ VS Code extension host                     webview (UI)
 | 3 | `extension.js` | `…pathToClaudeCodeExecutable=…,…env=…` + its terminator, in `spawnClaude` | **substitute `ANTHROPIC_*` when the process starts** |
 | 4 | `webview/index.js` | `n.commandRegistry.registerAction({id:"model"` | access their command registry and jsx factory |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
+
+### The context menu
+
+The Cut/Copy/Paste menu over a webview is VS Code's own, and the only supported way to add to it is a
+`menus."webview/context"` contribution in the *extension's* manifest. Editing an installed extension's
+package.json is not an option — the scanned manifest is cached against the mtime of `extensions.json`,
+so the edit is either ignored or trips VS Code's "Extensions have been modified on disk" error.
+
+The page can pre-empt the menu instead. VS Code's webview preload leads its own handler with
+`if (e.defaultPrevented) return;`, so calling `preventDefault()` means its menu is never requested.
+Claudapter does that only for a right-click inside a non-empty transcript selection and draws its own
+menu there; everywhere else — the composer included — the stock menu is untouched. Because that
+suppression takes the stock **Copy** with it, the replacement menu carries Copy itself.
+
+This is the project's only dependency on VS Code rather than on the extension, so it is on the
+re-verification list: `resources/app/out/vs/workbench/contrib/webview/browser/pre/index.html`. If that
+early-return ever goes away the failure is two menus at once, not a loud error.
 
 A detailed teardown of the extension is in [docs/internals.md](docs/internals.md).
 
