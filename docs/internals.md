@@ -1,6 +1,8 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.232** (`anthropic.claude-code-2.1.232-win32-x64`). Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.232** (`anthropic.claude-code-2.1.232-win32-x64`) — the numbers were not re-derived for 2.1.231, which this branch targets. The two releases differ only in minified names and line offsets; every structure described below is the same in both.
+
+Everything here comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
