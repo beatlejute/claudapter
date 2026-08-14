@@ -539,6 +539,12 @@
         return row;
     }
 
+    function menuSeparator() {
+        var row = document.createElement('div');
+        row.className = 'ccx-menu-sep';
+        return row;
+    }
+
     function openMenu(x, y, items) {
         closeMenu();
         menu = document.createElement('div');
@@ -561,6 +567,49 @@
         window.addEventListener('scroll', closeMenu, true);
         window.addEventListener('blur', closeMenu, true);
         document.addEventListener('mousedown', onMenuOutside, true);
+    }
+
+    // --- Rewind ---------------------------------------------------------------------------------
+    //
+    // The app already does all of this. Its "Rewind to…" picker lists your own messages newest first
+    // with the last one already selected, and confirming restores the file checkpoint, forks the
+    // conversation at that message and puts its text back in the composer to edit. What it lacks is a
+    // way in: the action sits in the command menu under "Context" and nothing points at it.
+    //
+    // So this adds the gesture, not the feature — the same action, run through the registry's own
+    // executeCommand. Going through their action rather than their internals keeps the confirmation
+    // dialog, and with it the summary of which files a rewind would touch.
+    var REWIND_ACTION = 'rewind';
+
+    function rewindAvailable() {
+        if (!registry || typeof registry.executeCommand !== 'function') return false;
+        // registerAction files the handler in commandActions under the action id, and executeCommand
+        // is a silent no-op for an id that is gone. Ask first, so a renamed action means the item is
+        // absent rather than present and dead.
+        if (registry.commandActions && typeof registry.commandActions.has === 'function')
+            return registry.commandActions.has(REWIND_ACTION);
+        return Boolean(registry.findCommandByLabel && registry.findCommandByLabel('Rewind'));
+    }
+
+    function openRewind() {
+        try {
+            registry.executeCommand(REWIND_ACTION);
+        } catch (err) {
+            console.warn('ccx: rewind failed', err);
+            toast('Could not open Rewind.');
+        }
+    }
+
+    // Ctrl+Shift+Z. In a contenteditable that is redo, so the composer gives redo up for this — undo
+    // is untouched, and what redo would restore there is a line of prose. It is a trade, not a free
+    // key, which is also why the event is only swallowed when there is actually a picker to open.
+    function onRewindKey(e) {
+        if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+        if ((e.key || '').toLowerCase() !== 'z') return;
+        if (!rewindAvailable()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        openRewind();
     }
 
     function rangeHasPoint(range, x, y) {
@@ -598,28 +647,39 @@
             if (e.target.closest('a[href]')) return;
 
             var sel = usableSelection(e);
-            if (!sel) return;
-            var text = quoteText(sel);
-            if (!text) return;
+            var text = sel ? quoteText(sel) : '';
+            var items = [];
 
-            e.preventDefault();
-            e.stopPropagation();
-
-            var items = [
-                menuItem('Quote selection', function () {
+            if (text) {
+                var quote = menuItem('Quote selection', function () {
                     var el = composerReady();
                     if (!el) return toast('The composer is not available right now.');
                     if (!insertIntoComposer(el, text)) toast('Could not insert the quote.');
-                }),
+                });
+                if (!composerReady()) quote.classList.add('ccx-menu-disabled');
+                items.push(quote);
                 // preventDefault took the stock Copy away with the rest of the menu, so it comes back
                 // here. The webview iframe is granted clipboard-write, so this is the whole story.
-                menuItem('Copy', function () {
-                    navigator.clipboard.writeText(sel.toString()).catch(function () {
-                        toast('Could not copy the selection.');
-                    });
-                }),
-            ];
-            if (!composerReady()) items[0].classList.add('ccx-menu-disabled');
+                items.push(
+                    menuItem('Copy', function () {
+                        navigator.clipboard.writeText(sel.toString()).catch(function () {
+                            toast('Could not copy the selection.');
+                        });
+                    }),
+                );
+            }
+
+            // Reached with no selection too, which is the point: over a transcript the stock menu is
+            // three inert entries, so replacing it costs nothing there. The composer is outside
+            // messagesContainer_ and keeps its own menu, which is the one where Paste matters.
+            if (rewindAvailable()) {
+                if (items.length) items.push(menuSeparator());
+                items.push(menuItem('Rewind…', openRewind));
+            }
+            if (!items.length) return;
+
+            e.preventDefault();
+            e.stopPropagation();
             openMenu(e.clientX, e.clientY, items);
         } catch (err) {
             console.warn('ccx: context menu failed', err);
@@ -643,6 +703,9 @@
         // Capture phase: React binds its delegated listeners on #root, so this runs first, and
         // stopPropagation() here also keeps VS Code's own window-level handler from seeing the event.
         document.addEventListener('contextmenu', onContextMenu, true);
+        // Same reason for the capture phase, and it has to be the window: the composer stops some keys
+        // at its own handler, and the composer is exactly where you are when you want this.
+        window.addEventListener('keydown', onRewindKey, true);
     }
 
     function restartChannel(name) {
@@ -719,6 +782,7 @@
         '.ccx-menu-item{padding:4px 22px 4px 10px;border-radius:3px;cursor:pointer;white-space:nowrap}',
         '.ccx-menu-item:hover{color:var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground));background:var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground))}',
         '.ccx-menu-disabled{opacity:.45;pointer-events:none}',
+        '.ccx-menu-sep{height:1px;margin:4px 6px;background:var(--vscode-menu-separatorBackground, var(--vscode-widget-border, rgba(128,128,128,.35)))}',
     ].join('');
     document.head.appendChild(s);
 

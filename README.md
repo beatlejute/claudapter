@@ -235,13 +235,40 @@ so the edit is either ignored or trips VS Code's "Extensions have been modified 
 
 The page can pre-empt the menu instead. VS Code's webview preload leads its own handler with
 `if (e.defaultPrevented) return;`, so calling `preventDefault()` means its menu is never requested.
-Claudapter does that only for a right-click inside a non-empty transcript selection and draws its own
-menu there; everywhere else — the composer included — the stock menu is untouched. Because that
-suppression takes the stock **Copy** with it, the replacement menu carries Copy itself.
+Claudapter does that only for a right-click inside the transcript and draws its own menu there;
+everywhere else — the composer included — the stock menu is untouched, which is what matters, because
+the composer is where Paste means something. Over a transcript the stock entries are inert anyway.
+Because the suppression takes the stock **Copy** with it, the replacement menu carries Copy itself.
+*Quote selection* and *Copy* appear only when something is selected; *Rewind…* always does.
 
 This is the project's only dependency on VS Code rather than on the extension, so it is on the
 re-verification list: `resources/app/out/vs/workbench/contrib/webview/browser/pre/index.html`. If that
 early-return ever goes away the failure is two menus at once, not a loud error.
+
+### Taking back the last message
+
+The extension already has all of this, and claudapter adds no part of it. Its *Rewind to…* picker
+lists your own messages newest first with the last one selected, and confirming restores the file
+checkpoint, forks the conversation at that message and puts its text back in the composer to edit:
+
+```js
+C = await session.rewindCode(uuid)                          // files
+app.forkConversation(sessionId, promptText, resumeAtMessageId)  // history, and the text to edit
+```
+
+What it lacked was a way in — the action lives in the command menu under *Context*. So claudapter
+adds the gesture only: **Ctrl+Shift+Z**, and *Rewind…* in the right-click menu. Both call
+`registry.executeCommand('rewind')` on the command registry the provider chip is already registered
+against, so no new signature is involved and their confirmation dialog — including the summary of
+which files a rewind would touch — is still the thing that decides.
+
+Two costs worth knowing. Ctrl+Shift+Z is **redo** inside the composer, and that is what it gives up;
+Ctrl+Z is untouched. And the action id `rewind` is their code, not ours: if it is renamed, the menu
+item disappears and the key goes back to redo, which `npm run apply` reports as a NOTE rather than
+letting it pass unnoticed.
+
+Recalling the text alone needs none of this — **↑** in an empty composer already cycles your previous
+messages, without touching the conversation.
 
 A detailed teardown of the extension is in [docs/internals.md](docs/internals.md).
 
