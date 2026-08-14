@@ -228,15 +228,18 @@ host too old to send the field.
 
 ### Resuming after an error or interrupt
 
-When the model stops mid-run — an error banner, a rate limit, or the user pressing Stop — the
-conversation halts and the only way forward is to type "continue" by hand. Claudapter injects that
-prompt automatically when the composer is empty and a terminal state is visible:
+When the model stops mid-run — an error banner or the user pressing Stop — the conversation halts and
+the only way forward is to type "continue" by hand. Claudapter injects that prompt automatically when
+the composer is empty and one of those halt states is visible:
 
 ```js
-[class*="banner_"][data-color="error"]        // error banner
+[class*="banner_"][data-color="error"]        // error banner (a 429 rate limit lands here too)
 [class*="interruptedMessage_"]                // user interrupt
-[class*="banner_"][data-color="warning"]      // rate limit warning
 ```
+
+Deliberately absent: the `data-color="warning"` banner. That one is "you are *approaching* a limit"
+while the run is healthy, so filling the composer there would inject into a live conversation rather
+than resume a halted one.
 
 The prompt follows `language` from `/config` (20 languages, same as the attachment prompt). It
 resets when the terminal state clears, so the next error gets a fresh prompt.

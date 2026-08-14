@@ -516,14 +516,13 @@
 
     // --- Resume after terminal state --------------------------------------------------------------
     //
-    // When the model hits a rate limit, an error, or the user interrupts, the conversation stops and
-    // the only way forward is to type "continue" by hand. This injects that prompt automatically when
-    // the composer is empty and a terminal state is visible in the transcript.
+    // When the model hits an error or the user interrupts, the conversation stops and the only way
+    // forward is to type "continue" by hand. This injects that prompt automatically when the composer
+    // is empty and one of those halt states is visible in the transcript.
     //
-    // The three states are distinguished by their markup:
-    //   - Error banner:       [class*="banner_"][data-color="error"]
-    //   - Interrupt message:  [class*="interruptedMessage_"]
-    //   - Rate limit warning: [class*="banner_"][data-color="warning"]
+    // Two states, distinguished by their markup:
+    //   - Error banner:      [class*="banner_"][data-color="error"]
+    //   - Interrupt message: [class*="interruptedMessage_"]
     //
     // The prompt is injected once per terminal state. It resets when the state clears (the user sends
     // a message and the banner disappears), so the next terminal gets a fresh prompt.
@@ -532,16 +531,17 @@
     var promptedForResume = false;
     var lastResumeState = null;
 
-    // Check for any of the three terminal states. Returns the first one found, or null.
+    // Check for the two halt states worth resuming: a real error (the 429 that hits a limit is an
+    // error, so it lands here too) and a user interrupt. Deliberately NOT the warning banner — that
+    // one shows "you are approaching a limit" while the run is perfectly healthy, so filling the
+    // composer there would read as the prompt interrupting a live conversation rather than resuming a
+    // halted one.
     function detectTerminalState() {
         var errorBanner = document.querySelector('[class*="banner_"][data-color="error"]');
         if (errorBanner && errorBanner.offsetParent !== null) return 'error';
 
         var interrupt = document.querySelector('[class*="interruptedMessage_"]');
         if (interrupt && interrupt.offsetParent !== null) return 'interrupt';
-
-        var rateLimit = document.querySelector('[class*="banner_"][data-color="warning"]');
-        if (rateLimit && rateLimit.offsetParent !== null) return 'rate-limit';
 
         return null;
     }
@@ -567,7 +567,7 @@
             }
 
             // Idle and halted. Don't re-inject for the same halt, but do inject if the state changed
-            // (e.g., error cleared, then a rate limit appeared).
+            // (e.g., the error cleared, then the user interrupted).
             if (promptedForResume && lastResumeState === state) return;
 
             var el = composerReady();
