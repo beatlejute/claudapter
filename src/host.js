@@ -292,6 +292,145 @@ function modelsOf(name) {
     };
 }
 
+// --- The attachment draft, in the language from /config ------------------------------------------
+//
+// /config writes `language` into ~/.claude/settings.json, and the CLI accepts three shapes for it: a
+// name ("russian"), that name in its own script ("русский"), or a code or locale ("ru", "ru-RU").
+// The twenty languages below are exactly the ones it resolves; anything else falls back to English
+// there, so it falls back here too — the draft should never be in a language the answer will not be.
+//
+// The wording is the payload: one row per language, the noun going into %s so the carrier sentence
+// is written once. To reword a language, edit its row and nothing else.
+const NOUN_KEYS = ['image', 'images', 'attachment', 'attachments'];
+
+const LANGUAGES = {
+    en: {
+        names: ['english'],
+        prompt: 'Analyse the %s in the context of this conversation',
+        nouns: ['image', 'images', 'attachment', 'attachments'],
+    },
+    es: {
+        names: ['spanish', 'español', 'espanol'],
+        prompt: 'Analiza %s en el contexto de esta conversación',
+        nouns: ['la imagen', 'las imágenes', 'el archivo adjunto', 'los archivos adjuntos'],
+    },
+    fr: {
+        names: ['french', 'français', 'francais'],
+        prompt: 'Analyse %s dans le contexte de cette conversation',
+        nouns: ["l'image", 'les images', 'la pièce jointe', 'les pièces jointes'],
+    },
+    ja: {
+        names: ['japanese', '日本語'],
+        prompt: 'この会話の文脈で%sを分析してください',
+        nouns: ['画像', '画像', '添付ファイル', '添付ファイル'],
+    },
+    de: {
+        names: ['german', 'deutsch'],
+        prompt: 'Analysiere %s im Kontext dieser Unterhaltung',
+        nouns: ['das Bild', 'die Bilder', 'den Anhang', 'die Anhänge'],
+    },
+    pt: {
+        names: ['portuguese', 'português', 'portugues'],
+        prompt: 'Analise %s no contexto desta conversa',
+        nouns: ['a imagem', 'as imagens', 'o anexo', 'os anexos'],
+    },
+    it: {
+        names: ['italian', 'italiano'],
+        prompt: 'Analizza %s nel contesto di questa conversazione',
+        nouns: ["l'immagine", 'le immagini', "l'allegato", 'gli allegati'],
+    },
+    ko: {
+        // The object particle is part of the noun: 이미지 takes 를, 첨부 파일 takes 을
+        names: ['korean', '한국어'],
+        prompt: '이 대화의 맥락에서 %s 분석해 주세요',
+        nouns: ['이미지를', '이미지들을', '첨부 파일을', '첨부 파일들을'],
+    },
+    hi: {
+        names: ['hindi', 'हिन्दी', 'हिंदी'],
+        prompt: 'इस बातचीत के संदर्भ में %s का विश्लेषण करें',
+        nouns: ['छवि', 'छवियों', 'संलग्न फ़ाइल', 'संलग्न फ़ाइलों'],
+    },
+    id: {
+        names: ['indonesian', 'bahasa indonesia', 'bahasa'],
+        prompt: 'Analisis %s dalam konteks percakapan ini',
+        nouns: ['gambar', 'gambar-gambar', 'lampiran', 'lampiran-lampiran'],
+    },
+    ru: {
+        names: ['russian', 'русский'],
+        prompt: 'Проанализируй %s в контексте этого диалога',
+        nouns: ['изображение', 'изображения', 'вложение', 'вложения'],
+    },
+    pl: {
+        names: ['polish', 'polski'],
+        prompt: 'Przeanalizuj %s w kontekście tej rozmowy',
+        nouns: ['obraz', 'obrazy', 'załącznik', 'załączniki'],
+    },
+    tr: {
+        names: ['turkish', 'türkçe', 'turkce'],
+        prompt: 'Bu sohbetin bağlamında %s analiz et',
+        nouns: ['görseli', 'görselleri', 'eki', 'ekleri'],
+    },
+    nl: {
+        names: ['dutch', 'nederlands'],
+        prompt: 'Analyseer %s in de context van dit gesprek',
+        nouns: ['de afbeelding', 'de afbeeldingen', 'de bijlage', 'de bijlagen'],
+    },
+    uk: {
+        names: ['ukrainian', 'українська'],
+        prompt: 'Проаналізуй %s у контексті цієї розмови',
+        nouns: ['зображення', 'зображення', 'вкладення', 'вкладення'],
+    },
+    el: {
+        names: ['greek', 'ελληνικά'],
+        prompt: 'Ανάλυσε %s στο πλαίσιο αυτής της συζήτησης',
+        nouns: ['την εικόνα', 'τις εικόνες', 'το συνημμένο', 'τα συνημμένα'],
+    },
+    cs: {
+        names: ['czech', 'čeština', 'cestina'],
+        prompt: 'Analyzuj %s v kontextu této konverzace',
+        nouns: ['obrázek', 'obrázky', 'přílohu', 'přílohy'],
+    },
+    da: {
+        names: ['danish', 'dansk'],
+        prompt: 'Analysér %s i konteksten af denne samtale',
+        nouns: ['billedet', 'billederne', 'den vedhæftede fil', 'de vedhæftede filer'],
+    },
+    sv: {
+        names: ['swedish', 'svenska'],
+        prompt: 'Analysera %s i kontexten av den här konversationen',
+        nouns: ['bilden', 'bilderna', 'bilagan', 'bilagorna'],
+    },
+    no: {
+        names: ['norwegian', 'norsk'],
+        prompt: 'Analyser %s i konteksten av denne samtalen',
+        nouns: ['bildet', 'bildene', 'vedlegget', 'vedleggene'],
+    },
+};
+
+// Same order of attempts as the CLI: an exact code, then a name, then the part before the dash so a
+// full locale still lands. Unrecognised is English, which is also what the CLI answers in.
+function languageOf(value) {
+    if (typeof value !== 'string') return 'en';
+    const wanted = value.toLowerCase().trim();
+    if (!wanted) return 'en';
+    if (LANGUAGES[wanted]) return wanted;
+    for (const code of Object.keys(LANGUAGES)) if (LANGUAGES[code].names.includes(wanted)) return code;
+    const base = wanted.split('-')[0];
+    return LANGUAGES[base] ? base : 'en';
+}
+
+// The webview is handed the four finished sentences rather than the language, so it only has to look
+// at what is attached. Riding on ccx:state means a /config change repaints them without a reload:
+// settings.json is already watched, and every change broadcasts.
+function attachmentPrompts() {
+    const lang = LANGUAGES[languageOf(readJson(SETTINGS_FILE)?.language)] || LANGUAGES.en;
+    const out = {};
+    NOUN_KEYS.forEach((key, i) => {
+        out[key] = lang.prompt.replace('%s', lang.nouns[i]);
+    });
+    return out;
+}
+
 function stateFor(sessionId, webview) {
     const profiles = listProfiles();
     const active = effectiveProfile(sessionId, webview);
@@ -300,6 +439,7 @@ function stateFor(sessionId, webview) {
         active,
         // The history list resolves each row's provider from here
         bindings: loadBindings(),
+        attachmentPrompts: attachmentPrompts(),
         models: active && active !== 'claude' ? modelsOf(active) : null,
         profiles: profiles.map((name) => {
             const env = profileEnv(name);

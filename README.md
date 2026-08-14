@@ -215,6 +215,17 @@ will be sent is visible and editable beforehand. It is only written into an *emp
 is not written again until the last attachment is removed — otherwise clearing the draft by hand
 would immediately get it back, which is the feature arguing with the user.
 
+The wording follows `language` in `~/.claude/settings.json` — what `/config` writes — so the draft is
+in the language the answer will be in. All twenty languages the CLI resolves are covered, in every
+shape it accepts the setting (`russian`, `русский`, `ru`, `ru-RU`); anything else falls back to
+English, exactly as the CLI does. It also follows what is attached: *image* or *attachment*, singular
+or plural.
+
+`host.js` resolves the setting and sends the four finished sentences over `ccx:state`, so a `/config`
+change repaints them without a reload — `settings.json` is already watched. To reword a language,
+edit its row in `LANGUAGES` in `src/host.js`; the copy in `src/webview.js` is only the fallback for a
+host too old to send the field.
+
 ### The context menu
 
 The Cut/Copy/Paste menu over a webview is VS Code's own, and the only supported way to add to it is a

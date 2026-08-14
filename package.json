@@ -32,7 +32,7 @@
         "proxy": "node --use-env-proxy src/proxy/server.mjs",
         "login:chatgpt": "node --use-env-proxy scripts/login-chatgpt.mjs",
         "auth:status": "node scripts/login-chatgpt.mjs --status",
-        "test": "node test/proxy.test.mjs && node test/responses.test.mjs && node test/model-overrides.test.mjs && node test/profile-icons.test.mjs && node test/env-isolation.test.mjs && node test/proxy-revival.test.mjs"
+        "test": "node test/proxy.test.mjs && node test/responses.test.mjs && node test/model-overrides.test.mjs && node test/profile-icons.test.mjs && node test/env-isolation.test.mjs && node test/proxy-revival.test.mjs && node test/attachment-prompt.test.mjs"
     },
     "engines": {
         "node": ">=18"
