@@ -150,11 +150,20 @@ The adapter that VS Code starts automatically reads its variables from the `env`
 
 The reverse direction matters too: the `claude` process inherits `HTTP_PROXY` from VS Code and would route even `127.0.0.1` through the corporate proxy. Claudapter therefore injects `NO_PROXY=127.0.0.1,localhost` whenever the upstream is local — otherwise the CLI reports `API error: Connection error`.
 
+`proxy.json` **overrides** the environment, it does not fall back to it — `host.js` spawns the adapter
+with `{...process.env, ...proxy.json.env}`, so an entry there wins over whatever the shell or VS Code
+had. A stale host or port in that file therefore breaks the adapter while every other tool on the
+machine still works, and the CLI reports it only as `502 upstream unreachable: fetch failed`.
+
 Route diagnostics in one command:
 
 ```bash
-npm run diag     # prints the flag, the variables and the token endpoint verdict
+npm run diag     # probes sign-in and the adapter upstream over the adapter's own route
 ```
+
+It reports the effective values, marks the ones `proxy.json` shadowed, and re-execs itself with that
+environment before probing — `--use-env-proxy` reads the proxy variables once at startup, so testing
+the adapter's route from a shell that has different ones would otherwise give a false all-clear.
 
 `400 Missing parameter` = the route works; `403 unsupported_country` = the request bypassed the proxy.
 
