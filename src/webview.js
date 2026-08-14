@@ -347,6 +347,7 @@
                 decorateModelPicker();
                 decorateSessionList();
                 syncAttachmentPrompt();
+                syncResumePrompt();
             }, 60);
         }).observe(document.body, { childList: true, subtree: true });
     }
@@ -470,6 +471,8 @@
         var keys = ['image', 'images', 'attachment', 'attachments'];
         for (var i = 0; i < keys.length; i++) if (typeof next[keys[i]] !== 'string' || !next[keys[i]]) return;
         ATTACHMENT_PROMPTS = next;
+        // The resume prompt rides on the same payload.
+        if (typeof next.resume === 'string' && next.resume) RESUME_PROMPT = next.resume;
     }
 
     var promptedForAttachments = false;
@@ -508,6 +511,62 @@
             insertIntoComposer(el, ATTACHMENT_PROMPTS[attachmentNoun(chips)], false);
         } catch (err) {
             console.warn('ccx: attachment prompt failed', err);
+        }
+    }
+
+    // --- Resume after terminal state --------------------------------------------------------------
+    //
+    // When the model hits a rate limit, an error, or the user interrupts, the conversation stops and
+    // the only way forward is to type "continue" by hand. This injects that prompt automatically when
+    // the composer is empty and a terminal state is visible in the transcript.
+    //
+    // The three states are distinguished by their markup:
+    //   - Error banner:       [class*="banner_"][data-color="error"]
+    //   - Interrupt message:  [class*="interruptedMessage_"]
+    //   - Rate limit warning: [class*="banner_"][data-color="warning"]
+    //
+    // The prompt is injected once per terminal state. It resets when the state clears (the user sends
+    // a message and the banner disappears), so the next terminal gets a fresh prompt.
+
+    var RESUME_PROMPT = 'Continue from where you stopped';
+    var promptedForResume = false;
+    var lastResumeState = null;
+
+    // Check for any of the three terminal states. Returns the first one found, or null.
+    function detectTerminalState() {
+        var errorBanner = document.querySelector('[class*="banner_"][data-color="error"]');
+        if (errorBanner && errorBanner.offsetParent !== null) return 'error';
+
+        var interrupt = document.querySelector('[class*="interruptedMessage_"]');
+        if (interrupt && interrupt.offsetParent !== null) return 'interrupt';
+
+        var rateLimit = document.querySelector('[class*="banner_"][data-color="warning"]');
+        if (rateLimit && rateLimit.offsetParent !== null) return 'rate-limit';
+
+        return null;
+    }
+
+    function syncResumePrompt() {
+        try {
+            var state = detectTerminalState();
+            if (!state) {
+                // Reset when no terminal state is visible, so the next one gets a prompt.
+                promptedForResume = false;
+                lastResumeState = null;
+                return;
+            }
+            // Don't re-inject for the same state, but do inject if the state changed (e.g., error
+            // cleared, then a rate limit appeared).
+            if (promptedForResume && lastResumeState === state) return;
+
+            var el = composerReady();
+            if (!el || el.textContent.trim()) return;
+
+            promptedForResume = true;
+            lastResumeState = state;
+            insertIntoComposer(el, RESUME_PROMPT, false);
+        } catch (err) {
+            console.warn('ccx: resume prompt failed', err);
         }
     }
 

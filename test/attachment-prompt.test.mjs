@@ -85,11 +85,14 @@ assert.equal(en.attachments, 'Analyse the attachments in the context of this con
 const CODES = 'en es fr ja de pt it ko hi id ru pl tr nl uk el cs da sv no'.split(' ');
 for (const code of CODES) {
     const p = promptsFor(code);
-    for (const key of ['image', 'images', 'attachment', 'attachments'])
+    for (const key of ['image', 'images', 'attachment', 'attachments', 'resume'])
         assert.ok(p[key] && typeof p[key] === 'string', `${code}.${key} is missing`);
     // Plural may legitimately equal singular (Japanese, Ukrainian), but a picture is never a file.
     assert.notEqual(p.image, p.attachment, `${code} words an image and an attachment the same`);
-    if (code !== 'en') assert.notEqual(p.image, EN, `${code} fell through to English — no row in LANGUAGES`);
+    if (code !== 'en') {
+        assert.notEqual(p.image, EN, `${code} fell through to English — no row in LANGUAGES`);
+        assert.notEqual(p.resume, 'Continue from where you stopped', `${code} resume fell through to English`);
+    }
 }
 
 rmSync(home, { recursive: true, force: true });
