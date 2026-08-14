@@ -345,6 +345,7 @@
             timer = setTimeout(function () {
                 decorateModelPicker();
                 decorateSessionList();
+                syncAttachmentPrompt();
             }, 60);
         }).observe(document.body, { childList: true, subtree: true });
     }
@@ -424,7 +425,7 @@
     // One execCommand per line, with insertLineBreak between them. A single insertText carrying the
     // newlines is what the app itself uses for @-mentions, but it splits a multi-line payload into
     // <div> blocks and mangles the text; line-at-a-time lands it verbatim.
-    function insertIntoComposer(el, text) {
+    function insertIntoComposer(el, text, trailingBreak) {
         el.focus();
         var lines = text.split('\n');
         for (var i = 0; i < lines.length; i++) {
@@ -433,7 +434,61 @@
         }
         // A trailing break would leave the caret before it rather than after, so the blank line the
         // user needs is inserted as the separator for whatever they type next.
-        return document.execCommand('insertLineBreak');
+        return trailingBreak === false ? true : document.execCommand('insertLineBreak');
+    }
+
+    // --- Attachment with no text ---------------------------------------------------------------
+    //
+    // An image alone cannot be sent. Submit starts with `let je = te.current?.textContent?.trim()||"";
+    // if(!je) return;`, and the send button is `disabled: !busy && !canSendMessage` where
+    // canSendMessage is `!!v.trim()` — so with an empty composer the button is genuinely disabled and
+    // does not even emit a click. Intercepting the send is therefore impossible; the only way through
+    // is to make the text non-empty, which is what enables their button by their own rule.
+    //
+    // The draft is written the moment the attachment appears rather than at submit time, so the user
+    // sees exactly what will be sent and can edit or replace it before pressing Enter.
+
+    // The one line to change if you want different wording. %s becomes image/images or
+    // attachment/attachments, matching what is actually attached and how many.
+    var ATTACHMENT_PROMPT = 'Analyse the %s in the context of this conversation';
+
+    var promptedForAttachments = false;
+
+    function attachmentChips() {
+        var box = document.querySelector('[class*="attachedFilesContainer_"]');
+        // Every chip carries its own remove button; counting those is steadier than counting children,
+        // which would also pick up whatever wrapper the app decides to add around them.
+        return box ? Array.prototype.slice.call(box.querySelectorAll('button[title="Remove attachment"]')) : [];
+    }
+
+    // A chip renders the thumbnail as an <img> only when the file is an image; a document gets an icon
+    // component instead. That is the difference the wording needs.
+    function attachmentNoun(chips) {
+        var box = document.querySelector('[class*="attachedFilesContainer_"]');
+        var images = box ? box.querySelectorAll('img[class*="thumbIcon_"]').length : 0;
+        if (images === chips.length) return chips.length > 1 ? 'images' : 'image';
+        return chips.length > 1 ? 'attachments' : 'attachment';
+    }
+
+    function syncAttachmentPrompt() {
+        try {
+            var chips = attachmentChips();
+            if (!chips.length) {
+                // Reset only when the last attachment is gone, so clearing the draft by hand does not
+                // immediately get it written back — that would be the feature fighting the user.
+                promptedForAttachments = false;
+                return;
+            }
+            if (promptedForAttachments) return;
+
+            var el = composerReady();
+            if (!el || el.textContent.trim()) return;
+
+            promptedForAttachments = true;
+            insertIntoComposer(el, ATTACHMENT_PROMPT.replace('%s', attachmentNoun(chips)), false);
+        } catch (err) {
+            console.warn('ccx: attachment prompt failed', err);
+        }
     }
 
     function closeMenu() {
