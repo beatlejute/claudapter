@@ -62,6 +62,17 @@ const PATCHES = [
     },
 ];
 
+// Things the injected code drives without patching them. Losing one is not an error — claudapter
+// fails closed, the menu item is simply absent — but it is silent, and this is the only place the
+// disappearance is visible before a user notices the gesture stopped working.
+const EXPECTATIONS = [
+    {
+        file: 'webview/index.js',
+        find: 'registerAction({id:"rewind"',
+        what: 'the Rewind action — the "Rewind…" menu item and Ctrl+Shift+Z open it by id',
+    },
+];
+
 const MARKER = '__ccx';
 
 function versionOf(dirName) {
@@ -150,6 +161,17 @@ function apply(dir) {
         writeFileSync(file, src, 'utf8');
         checkSyntax(file);
         console.log(`patched ${rel} (${patches.length} hook(s))`);
+    }
+    checkExpectations(dir);
+}
+
+// Read from the backup: by now the file itself is patched, and an expectation is about their code
+function checkExpectations(dir) {
+    for (const e of EXPECTATIONS) {
+        const file = backupPath(path.join(dir, e.file));
+        if (!existsSync(file)) continue;
+        if (countHits(readFileSync(file, 'utf8'), e.find) === 0)
+            console.log(`  NOTE: ${e.file} no longer has ${e.what}. That feature is off; nothing else is affected.`);
     }
 }
 
