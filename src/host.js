@@ -618,6 +618,17 @@ function attachWebview(webview) {
             if (S.pendingProfile) ensureProxy(S.pendingProfile);
             return;
         }
+        // Launch is not the only moment the adapter has to be up. It is a detached process, so it can
+        // outlive nothing in particular: a crash, a kill, or the machine sleeping leaves the port shut
+        // while the tab stays open, and every prompt then dies on ConnectionRefused with no path back —
+        // the CLI's retries cannot help, and nothing here was listening. `io_message` is the webview
+        // handing over a user turn, which is exactly when it matters, and ensureProxy already no-ops
+        // unless the profile routes through 127.0.0.1 and that port is actually closed.
+        if (m.type === 'io_message') {
+            const profile = effectiveProfile(webview.__ccxSessionId, webview);
+            if (profile && localProxyPort(profile)) ensureProxy(profile);
+            return;
+        }
         // Only update_session_state is about the tab's own session; delete_session, rename_session and
         // open_in_editor carry the id of whichever history row the user clicked. Even this one is emitted
         // once more for the session that just STOPPED being active, so it counts as a weak source.
