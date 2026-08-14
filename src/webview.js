@@ -555,16 +555,28 @@
                 lastResumeState = null;
                 return;
             }
+
+            var el = composerReady();
+            if (!el) return;
+
+            // The flag is cleared by two paths: no terminal state (above), or a composer that went
+            // back to empty while the same terminal still shows — which is the user having just sent
+            // the injected prompt and the answer still being on its way. Without this, the second and
+            // later interruptions would never get a prompt, because the first one left the flag set.
+            if (promptedForResume && !el.textContent.trim()) {
+                promptedForResume = false;
+                lastResumeState = null;
+            }
+
             // Don't re-inject for the same state, but do inject if the state changed (e.g., error
             // cleared, then a rate limit appeared).
             if (promptedForResume && lastResumeState === state) return;
 
-            var el = composerReady();
-            if (!el || el.textContent.trim()) return;
+            if (el.textContent.trim()) return;
 
+            insertIntoComposer(el, RESUME_PROMPT, false);
             promptedForResume = true;
             lastResumeState = state;
-            insertIntoComposer(el, RESUME_PROMPT, false);
         } catch (err) {
             console.warn('ccx: resume prompt failed', err);
         }
