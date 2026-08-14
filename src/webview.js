@@ -531,18 +531,35 @@
     var promptedForResume = false;
     var lastResumeState = null;
 
+    // An interrupt marker is transcript history: it stays in the DOM long after the conversation has
+    // moved on, so its presence alone does not mean anything is halted NOW. It is a live halt only
+    // while nothing renders after it — the moment an answer or a newer message follows, that
+    // interrupt is a past event being displayed, not a state to resume.
+    function interruptIsCurrent() {
+        var halts = document.querySelectorAll('[class*="interruptedMessage_"]');
+        if (!halts.length) return false;
+        var halt = halts[halts.length - 1];
+        if (halt.offsetParent === null) return false;
+        var messages = document.querySelectorAll(
+            '[data-testid="assistant-message"], [class*="userMessageContainer_"]',
+        );
+        if (!messages.length) return true;
+        // querySelectorAll returns document order, so the last entry is the newest message. The halt
+        // marker renders inside its own user-message container, so "inside the newest message" and
+        // "nothing follows it" both mean the same thing: the halt is the end of the transcript.
+        var last = messages[messages.length - 1];
+        return last.contains(halt) || !(halt.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }
+
     // Check for the two halt states worth resuming: a real error (the 429 that hits a limit is an
-    // error, so it lands here too) and a user interrupt. Deliberately NOT the warning banner — that
-    // one shows "you are approaching a limit" while the run is perfectly healthy, so filling the
-    // composer there would read as the prompt interrupting a live conversation rather than resuming a
-    // halted one.
+    // error, so it lands here too) and a trailing user interrupt. Deliberately NOT the warning
+    // banner — that one shows "you are approaching a limit" while the run is perfectly healthy, so
+    // filling the composer there would read as the prompt interrupting a live conversation rather
+    // than resuming a halted one.
     function detectTerminalState() {
         var errorBanner = document.querySelector('[class*="banner_"][data-color="error"]');
         if (errorBanner && errorBanner.offsetParent !== null) return 'error';
-
-        var interrupt = document.querySelector('[class*="interruptedMessage_"]');
-        if (interrupt && interrupt.offsetParent !== null) return 'interrupt';
-
+        if (interruptIsCurrent()) return 'interrupt';
         return null;
     }
 
