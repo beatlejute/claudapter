@@ -226,6 +226,21 @@ change repaints them without a reload — `settings.json` is already watched. To
 edit its row in `LANGUAGES` in `src/host.js`; the copy in `src/webview.js` is only the fallback for a
 host too old to send the field.
 
+### Resuming after an error or interrupt
+
+When the model stops mid-run — an error banner, a rate limit, or the user pressing Stop — the
+conversation halts and the only way forward is to type "continue" by hand. Claudapter injects that
+prompt automatically when the composer is empty and a terminal state is visible:
+
+```js
+[class*="banner_"][data-color="error"]        // error banner
+[class*="interruptedMessage_"]                // user interrupt
+[class*="banner_"][data-color="warning"]      // rate limit warning
+```
+
+The prompt follows `language` from `/config` (20 languages, same as the attachment prompt). It
+resets when the terminal state clears, so the next error gets a fresh prompt.
+
 ### The context menu
 
 The Cut/Copy/Paste menu over a webview is VS Code's own, and the only supported way to add to it is a
