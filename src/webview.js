@@ -186,6 +186,7 @@
                 bindings: d.bindings || {},
                 sessionId: d.sessionId || state.sessionId,
             };
+            adoptAttachmentPrompts(d.attachmentPrompts);
             syncAction();
             syncChip();
             decorateModelPicker();
@@ -448,9 +449,28 @@
     // The draft is written the moment the attachment appears rather than at submit time, so the user
     // sees exactly what will be sent and can edit or replace it before pressing Enter.
 
-    // The one line to change if you want different wording. %s becomes image/images or
-    // attachment/attachments, matching what is actually attached and how many.
-    var ATTACHMENT_PROMPT = 'Analyse the %s in the context of this conversation';
+    // The wording follows the language from /config. host.js resolves ~/.claude/settings.json into
+    // these four finished sentences and ships them in ccx:state, so this side only has to decide which
+    // of them fits what is attached — and a /config change repaints them without a reload.
+    //
+    // These English defaults are what stays in place if a host that predates the field is loaded, and
+    // are also what an unrecognised language resolves to. To reword any language, edit LANGUAGES in
+    // host.js; this table is only the fallback.
+    var ATTACHMENT_PROMPTS = {
+        image: 'Analyse the image in the context of this conversation',
+        images: 'Analyse the images in the context of this conversation',
+        attachment: 'Analyse the attachment in the context of this conversation',
+        attachments: 'Analyse the attachments in the context of this conversation',
+    };
+
+    // All or nothing: a half-filled table would mean one attachment count silently drops to English
+    // while the rest are translated, which reads as a bug in the wording rather than in the message.
+    function adoptAttachmentPrompts(next) {
+        if (!next) return;
+        var keys = ['image', 'images', 'attachment', 'attachments'];
+        for (var i = 0; i < keys.length; i++) if (typeof next[keys[i]] !== 'string' || !next[keys[i]]) return;
+        ATTACHMENT_PROMPTS = next;
+    }
 
     var promptedForAttachments = false;
 
@@ -485,7 +505,7 @@
             if (!el || el.textContent.trim()) return;
 
             promptedForAttachments = true;
-            insertIntoComposer(el, ATTACHMENT_PROMPT.replace('%s', attachmentNoun(chips)), false);
+            insertIntoComposer(el, ATTACHMENT_PROMPTS[attachmentNoun(chips)], false);
         } catch (err) {
             console.warn('ccx: attachment prompt failed', err);
         }
