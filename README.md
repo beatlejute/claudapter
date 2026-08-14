@@ -30,6 +30,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
 - **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
+- **Send an image with no text** — attaching a file to an empty composer writes a short prompt into it (`Analyse the image in the context of this conversation`, agreeing with what is actually attached), which is what makes the send button light up. It is a normal draft: edit it, replace it, or just press Enter. The wording is the `ATTACHMENT_PROMPT` constant in [src/webview.js](src/webview.js).
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
 
 ## Requirements
@@ -195,6 +196,24 @@ VS Code extension host                     webview (UI)
 | 3 | `extension.js` | `…pathToClaudeCodeExecutable=…,…env=…` + its terminator, in `spawnClaude` | **substitute `ANTHROPIC_*` when the process starts** |
 | 4 | `webview/index.js` | `n.commandRegistry.registerAction({id:"model"` | access their command registry and jsx factory |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
+
+### Sending an attachment on its own
+
+Claude Code will not send a file without text. Submit opens with
+
+```js
+let je = te.current?.textContent?.trim() || "";
+if (!je) return;
+```
+
+and the send button is `disabled: !busy && !canSendMessage`, where `canSendMessage` is `!!v.trim()`.
+A disabled button emits no click at all, so there is nothing to intercept — the only way through is
+to make the text non-empty, which satisfies their own rule and lights the button up.
+
+So the draft is written when the attachment appears, not when the user tries to send: that way what
+will be sent is visible and editable beforehand. It is only written into an *empty* composer, and it
+is not written again until the last attachment is removed — otherwise clearing the draft by hand
+would immediately get it back, which is the feature arguing with the user.
 
 ### The context menu
 
