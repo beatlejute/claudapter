@@ -308,102 +308,122 @@ const LANGUAGES = {
         names: ['english'],
         prompt: 'Analyse the %s in the context of this conversation',
         nouns: ['image', 'images', 'attachment', 'attachments'],
+        resume: "Continue from where you stopped",
     },
     es: {
         names: ['spanish', 'español', 'espanol'],
         prompt: 'Analiza %s en el contexto de esta conversación',
         nouns: ['la imagen', 'las imágenes', 'el archivo adjunto', 'los archivos adjuntos'],
+        resume: "Continúa desde donde lo dejaste",
     },
     fr: {
         names: ['french', 'français', 'francais'],
         prompt: 'Analyse %s dans le contexte de cette conversation',
         nouns: ["l'image", 'les images', 'la pièce jointe', 'les pièces jointes'],
+        resume: "Reprends là où tu t'es arrêté",
     },
     ja: {
         names: ['japanese', '日本語'],
         prompt: 'この会話の文脈で%sを分析してください',
         nouns: ['画像', '画像', '添付ファイル', '添付ファイル'],
+        resume: "中断したところから続けてください",
     },
     de: {
         names: ['german', 'deutsch'],
         prompt: 'Analysiere %s im Kontext dieser Unterhaltung',
         nouns: ['das Bild', 'die Bilder', 'den Anhang', 'die Anhänge'],
+        resume: "Mach dort weiter, wo du aufgehört hast",
     },
     pt: {
         names: ['portuguese', 'português', 'portugues'],
         prompt: 'Analise %s no contexto desta conversa',
         nouns: ['a imagem', 'as imagens', 'o anexo', 'os anexos'],
+        resume: "Continue de onde parou",
     },
     it: {
         names: ['italian', 'italiano'],
         prompt: 'Analizza %s nel contesto di questa conversazione',
         nouns: ["l'immagine", 'le immagini', "l'allegato", 'gli allegati'],
+        resume: "Riprendi da dove ti sei fermato",
     },
     ko: {
         // The object particle is part of the noun: 이미지 takes 를, 첨부 파일 takes 을
         names: ['korean', '한국어'],
         prompt: '이 대화의 맥락에서 %s 분석해 주세요',
         nouns: ['이미지를', '이미지들을', '첨부 파일을', '첨부 파일들을'],
+        resume: "중단된 지점부터 이어서 진행해 주세요",
     },
     hi: {
         names: ['hindi', 'हिन्दी', 'हिंदी'],
         prompt: 'इस बातचीत के संदर्भ में %s का विश्लेषण करें',
         nouns: ['छवि', 'छवियों', 'संलग्न फ़ाइल', 'संलग्न फ़ाइलों'],
+        resume: "जहाँ रुके थे वहीं से जारी रखें",
     },
     id: {
         names: ['indonesian', 'bahasa indonesia', 'bahasa'],
         prompt: 'Analisis %s dalam konteks percakapan ini',
         nouns: ['gambar', 'gambar-gambar', 'lampiran', 'lampiran-lampiran'],
+        resume: "Lanjutkan dari tempat kamu berhenti",
     },
     ru: {
         names: ['russian', 'русский'],
         prompt: 'Проанализируй %s в контексте этого диалога',
         nouns: ['изображение', 'изображения', 'вложение', 'вложения'],
+        resume: "Продолжай с того места, где остановился",
     },
     pl: {
         names: ['polish', 'polski'],
         prompt: 'Przeanalizuj %s w kontekście tej rozmowy',
         nouns: ['obraz', 'obrazy', 'załącznik', 'załączniki'],
+        resume: "Kontynuuj od miejsca, w którym przerwałeś",
     },
     tr: {
         names: ['turkish', 'türkçe', 'turkce'],
         prompt: 'Bu sohbetin bağlamında %s analiz et',
         nouns: ['görseli', 'görselleri', 'eki', 'ekleri'],
+        resume: "Kaldığın yerden devam et",
     },
     nl: {
         names: ['dutch', 'nederlands'],
         prompt: 'Analyseer %s in de context van dit gesprek',
         nouns: ['de afbeelding', 'de afbeeldingen', 'de bijlage', 'de bijlagen'],
+        resume: "Ga verder waar je gebleven was",
     },
     uk: {
         names: ['ukrainian', 'українська'],
         prompt: 'Проаналізуй %s у контексті цієї розмови',
         nouns: ['зображення', 'зображення', 'вкладення', 'вкладення'],
+        resume: "Продовжуй з того місця, де зупинився",
     },
     el: {
         names: ['greek', 'ελληνικά'],
         prompt: 'Ανάλυσε %s στο πλαίσιο αυτής της συζήτησης',
         nouns: ['την εικόνα', 'τις εικόνες', 'το συνημμένο', 'τα συνημμένα'],
+        resume: "Συνέχισε από εκεί που σταμάτησες",
     },
     cs: {
         names: ['czech', 'čeština', 'cestina'],
         prompt: 'Analyzuj %s v kontextu této konverzace',
         nouns: ['obrázek', 'obrázky', 'přílohu', 'přílohy'],
+        resume: "Pokračuj tam, kde jsi skončil",
     },
     da: {
         names: ['danish', 'dansk'],
         prompt: 'Analysér %s i konteksten af denne samtale',
         nouns: ['billedet', 'billederne', 'den vedhæftede fil', 'de vedhæftede filer'],
+        resume: "Fortsæt hvor du slap",
     },
     sv: {
         names: ['swedish', 'svenska'],
         prompt: 'Analysera %s i kontexten av den här konversationen',
         nouns: ['bilden', 'bilderna', 'bilagan', 'bilagorna'],
+        resume: "Fortsätt där du slutade",
     },
     no: {
         names: ['norwegian', 'norsk'],
         prompt: 'Analyser %s i konteksten av denne samtalen',
         nouns: ['bildet', 'bildene', 'vedlegget', 'vedleggene'],
+        resume: "Fortsett der du slapp",
     },
 };
 
@@ -428,6 +448,9 @@ function attachmentPrompts() {
     NOUN_KEYS.forEach((key, i) => {
         out[key] = lang.prompt.replace('%s', lang.nouns[i]);
     });
+    // The resume phrase rides on the same payload — one less field on ccx:state, and the webview
+    // reads it from the same place it reads the attachment prompts.
+    out.resume = lang.resume;
     return out;
 }
 
