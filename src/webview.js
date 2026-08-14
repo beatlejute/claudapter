@@ -546,33 +546,32 @@
         return null;
     }
 
+    // The send button swaps its icon between send and stop: stopIcon_ only renders while the model is
+    // generating. That is the difference between "the user just sent the prompt and the answer is on
+    // its way" and "the run actually halted and is waiting" — the interrupt message stays in the
+    // transcript either way, so it cannot tell them apart on its own.
+    function modelBusy() {
+        var stop = document.querySelector('[class*="stopIcon_"]');
+        return Boolean(stop && stop.offsetParent !== null);
+    }
+
     function syncResumePrompt() {
         try {
             var state = detectTerminalState();
-            if (!state) {
-                // Reset when no terminal state is visible, so the next one gets a prompt.
+            // While the model is generating there is nothing to resume — the run is in progress, not
+            // halted. This also clears the flag from the last halt, so the next halt gets a prompt.
+            if (!state || modelBusy()) {
                 promptedForResume = false;
                 lastResumeState = null;
                 return;
             }
 
-            var el = composerReady();
-            if (!el) return;
-
-            // The flag is cleared by two paths: no terminal state (above), or a composer that went
-            // back to empty while the same terminal still shows — which is the user having just sent
-            // the injected prompt and the answer still being on its way. Without this, the second and
-            // later interruptions would never get a prompt, because the first one left the flag set.
-            if (promptedForResume && !el.textContent.trim()) {
-                promptedForResume = false;
-                lastResumeState = null;
-            }
-
-            // Don't re-inject for the same state, but do inject if the state changed (e.g., error
-            // cleared, then a rate limit appeared).
+            // Idle and halted. Don't re-inject for the same halt, but do inject if the state changed
+            // (e.g., error cleared, then a rate limit appeared).
             if (promptedForResume && lastResumeState === state) return;
 
-            if (el.textContent.trim()) return;
+            var el = composerReady();
+            if (!el || el.textContent.trim()) return;
 
             insertIntoComposer(el, RESUME_PROMPT, false);
             promptedForResume = true;
