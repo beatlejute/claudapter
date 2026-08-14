@@ -173,6 +173,27 @@ never by membership — grepping for `claude-desktop` and eyeballing the arrays 
 answer. Through 2.1.229 the settings filter is still `BLc`, consulted via `wj()`, and still excludes
 `claude-vscode`, so the warning stands.
 
+### The CLI does not remap `claude-fable-5` (2.1.232)
+
+Fable shipped as a model but not as a *family* in the two places the CLI remaps a requested model onto
+the `ANTHROPIC_DEFAULT_*_MODEL` env vars. In `resources/native-binary/claude.exe`:
+
+```js
+function t5p(e){let t=Vw(e)?.family,
+  r={opus:X.ANTHROPIC_DEFAULT_OPUS_MODEL,sonnet:X.ANTHROPIC_DEFAULT_SONNET_MODEL,haiku:X.ANTHROPIC_DEFAULT_HAIKU_MODEL},
+  n=t!==void 0&&Object.hasOwn(r,t)?r[t]:void 0; …}
+function Rci(e){if(e.startsWith("sonnet"))return"sonnet";if(e.startsWith("opus"))return"opus";if(e.startsWith("haiku"))return"haiku";return}
+```
+
+Neither `t5p`'s `r` object nor `Rci`'s prefix match knows `fable`, even though the model exists
+elsewhere (`latest_per_family:{fable:"claude-fable-5", …}`). So `claude-opus-5` / `claude-sonnet-5` /
+`claude-haiku-4-5` remap everywhere, but `claude-fable-5` only remaps through the adapter's
+`profileModelRules` — i.e. only for profiles routed through `127.0.0.1:8787` (codex/openai). Direct
+providers (`qwen`, `deepseek`, `glm`, `minimax`) send `claude-fable-5` verbatim and get a 400.
+
+Decision: not worked around — waiting on an upstream fix. Re-check `t5p`/`Rci` in the CLI bundle on
+each version bump; the day `fable:` appears in that `r` object, the direct providers recover it for free.
+
 ### Menu ordering
 
 The command registry (`class AX` in `webview/index.js`) sorts each section by a hard-coded id list; unknown ids fall to the end:
