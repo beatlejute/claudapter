@@ -98,6 +98,8 @@ The id a tab is *really* on is announced by the CLI itself: `system/init` in the
 
 So a weak id is kept on the host only — it still resolves the profile and the models — and never travels to the page: `stateFor` sends `sessionId: null` while `__ccxSessionWeak` is set, and `restartChannel` in the page resumes only from what the channel itself announced or was launched with, never from `state.sessionId`. A switch on a tab with nothing said in it therefore restarts **fresh** (the toast says so), and the first `system/init` binds the real session to the profile that was chosen. Nothing is lost, because there was nothing to keep.
 
+**And even the strong source is early.** `system/init` proves the CLI *minted* the id, not that it *wrote* it: the transcript `<projects>/<slug>/<sessionId>.jsonl` appears on the first user turn. A session that is launched and dies before anyone types leaves an announced id and no file — and the extension's own `launchClaude()` passes `this.sessionId.value` on every relaunch of that tab, so from then on every restart repeats `--resume=<id>` → "No conversation found". Seven ids in the log had been launched that way (five of them from the weak path above, two from this one). Neither signal can decide this; the disk can. So `envFor` gets the options object as a third argument (injection point #3 now reads `envFor(env, opts.resume, opts)`) and clears `opts.resume` unless the transcript exists — the SDK builds `--resume=${w}` from that field after the assignment has run, so the spawn simply starts fresh. The check scans every project folder, because the id is unique and the slug is not ours to reconstruct.
+
 ## Traps found while patching
 
 ### `rename_tab` overwrites the icon

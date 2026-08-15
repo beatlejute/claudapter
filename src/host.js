@@ -231,7 +231,36 @@ async function ensureProxy(profile) {
     }
 }
 
-function envFor(baseEnv, resumeSessionId) {
+const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
+
+// The CLI writes <projects>/<cwd-slug>/<sessionId>.jsonl on the first user turn — not on system/init.
+// So an id can be perfectly real (the CLI announced it) and still resume to nothing: a session that
+// was launched and died before anyone typed. That is what `--resume` answers with "No conversation
+// found with session ID …". The disk is the only source that cannot be early, so it is the one that
+// decides. Scanned across all project folders, because the id is unique and the slug is not ours to
+// reconstruct.
+function transcriptExists(sessionId) {
+    if (!sessionId || !/^[0-9a-f-]{36}$/i.test(sessionId)) return false;
+    let dirs = [];
+    try {
+        dirs = fs.readdirSync(PROJECTS_DIR);
+    } catch {
+        return false;
+    }
+    for (const d of dirs) if (fs.existsSync(path.join(PROJECTS_DIR, d, sessionId + '.jsonl'))) return true;
+    return false;
+}
+
+function envFor(baseEnv, resumeSessionId, opts) {
+    // Guarding the resume is independent of the profile: even a plain Anthropic tab can be relaunched
+    // by the extension itself with an id whose transcript never came to be. Clearing opts.resume here
+    // is what turns `--resume=<id>` into a fresh start — the SDK reads that field after this runs.
+    if (opts && resumeSessionId && !transcriptExists(resumeSessionId)) {
+        dlog('resume dropped', { session: resumeSessionId, reason: 'no transcript on disk' });
+        console.log(`ccx: dropping --resume ${resumeSessionId} — no transcript on disk, starting fresh`);
+        opts.resume = undefined;
+        resumeSessionId = undefined;
+    }
     const profile = S.pendingProfile || getBinding(resumeSessionId);
     if (!profile) return baseEnv;
     const env = { ...baseEnv };
