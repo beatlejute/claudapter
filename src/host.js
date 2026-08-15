@@ -458,7 +458,11 @@ function stateFor(sessionId, webview) {
     const profiles = listProfiles();
     const active = effectiveProfile(sessionId, webview);
     return {
-        sessionId: sessionId || null,
+        // A weak id stays on the host. The page adopts whatever arrives here as state.sessionId and
+        // hands it straight back on ccx:apply as the id to resume — so a weak one would leave here as
+        // a guess and come back as an authoritative `--resume <id>`. It resolves the profile and the
+        // models exactly as before; it is only not repeated to the page.
+        sessionId: (webview && webview.__ccxSessionWeak ? null : sessionId) || null,
         active,
         // The history list resolves each row's provider from here
         bindings: loadBindings(),
