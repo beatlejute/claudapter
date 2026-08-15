@@ -39,12 +39,14 @@ const PATCHES = [
         // keeps the enclosing `if(` arity intact, `;` on 2.1.227+ closes the bare statement.
         //
         // The resume id is read off the options object (`resume:t`) instead of the parameter, which is renamed too.
+        // The object itself goes along as the third argument: envFor clears its `resume` when no transcript exists
+        // for that id, and the SDK builds `--resume=<id>` from that field after this expression has run.
         file: 'extension.js',
         find: /(\w+)\.pathToClaudeCodeExecutable=(\w+),\1\.executableArgs=(\w+),\1\.env=(\w+)(,\w+\)|;)/,
         replace: (_found, opts, bin, args, env, tail) =>
             `${opts}.pathToClaudeCodeExecutable=${bin},${opts}.executableArgs=${args},${opts}.env=(()=>{try{` +
             HOST_REQUIRE +
-            `return require(__p).envFor(${env},${opts}.resume)}catch(__e){return ${env}}})()${tail}`,
+            `return require(__p).envFor(${env},${opts}.resume,${opts})}catch(__e){return ${env}}})()${tail}`,
         where: 'replace',
     },
     {
