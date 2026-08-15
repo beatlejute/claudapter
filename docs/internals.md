@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.232** (`anthropic.claude-code-2.1.232-win32-x64`). Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`). Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -57,7 +57,7 @@ Every identifier there is a minified local, and the minifier reshuffles them rel
 | 2.1.227 | `f.env=b;` | `;` |
 | 2.1.228 | `f.env=v;` | `;` |
 | 2.1.229 | `f.env=v;` | `;` |
-| 2.1.231–2.1.232 | `f.env=v;` | `;` |
+| 2.1.231–2.1.233 | `f.env=v;` | `;` |
 
 2.1.227 is the one that changed the **shape**, not just the names. Up to 2.1.226 the three assignments were the condition of an `if`, with the node path as the last operand of the comma expression:
 
@@ -173,7 +173,7 @@ never by membership — grepping for `claude-desktop` and eyeballing the arrays 
 answer. Through 2.1.229 the settings filter is still `BLc`, consulted via `wj()`, and still excludes
 `claude-vscode`, so the warning stands.
 
-### The CLI does not remap `claude-fable-5` (2.1.232)
+### The CLI does not remap `claude-fable-5` (2.1.232, still in 2.1.233)
 
 Fable shipped as a model but not as a *family* in the two places the CLI remaps a requested model onto
 the `ANTHROPIC_DEFAULT_*_MODEL` env vars. In `resources/native-binary/claude.exe`:
