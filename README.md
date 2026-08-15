@@ -25,7 +25,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 
 - **"Switch provider…"** — the first entry in the *Model* section of the command menu, showing the active profile.
 - **Profile picker** — reads `~/.claude/profiles/*.json` and lists each profile with its model.
-- **Per-tab switching** — the `claude` process restarts on the same channel with `resume`, so the conversation history survives. Other tabs are untouched.
+- **Per-tab switching** — the `claude` process restarts on the same channel with `resume`, so the conversation history survives. Other tabs are untouched. On a tab that has not sent anything yet there is nothing to resume, so it starts fresh instead — the toast says which.
 - **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
 - **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.

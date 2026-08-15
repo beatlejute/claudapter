@@ -87,10 +87,16 @@ Messages from the webview that matter to a patcher:
 |---|---|---|
 | `launch_claude` | `channelId, cwd, resume, permissionMode, thinkingLevel` | intercepted right before the spawn to inject the profile |
 | `close_channel` | `channelId` | clean process shutdown before a restart |
-| `request.update_session_state` | `sessionId, state, title` | **the reliable source of `sessionId`** |
+| `request.update_session_state` | `sessionId, state, title` | a **weak** hint of the tab's session — see below |
 | `request.rename_tab` | `title, hasPendingPermissions, hasUnseenCompletion` | overwrites the tab title and icon |
 
-`system/init` in the CLI stream also contains `session_id`, but catching it by intercepting `webview.postMessage` proved unreliable — `update_session_state` is the one that works.
+### Two sources of the session id, and only one is safe to resume
+
+The id a tab is *really* on is announced by the CLI itself: `system/init` in the `io_message` stream carries `session_id`, and `host.js` reads it by wrapping `webview.postMessage`. That is the **strong** source: the CLI has written that session, so it can be bound to a profile and handed back as `--resume`.
+
+`update_session_state` also carries a `sessionId`, and it arrives earlier — but it is a **weak** source, for two reasons. It is emitted once more for the session that just *stopped* being active, so it can name a neighbouring tab. And on a tab that has not sent anything yet the page already holds a provisional id per channel: the CLI has written nothing under it, and resuming it is answered with `No conversation found with session ID …`. That was a real failure (2.1.233, five phantom `codex` bindings in `bindings.json`, all born this way): the host already refused to *bind* on a weak id, but it still echoed it in `ccx:state`, the page adopted it as `state.sessionId`, and `ccx:apply` handed it straight back as the id to resume.
+
+So a weak id is kept on the host only — it still resolves the profile and the models — and never travels to the page: `stateFor` sends `sessionId: null` while `__ccxSessionWeak` is set, and `restartChannel` in the page resumes only from what the channel itself announced or was launched with, never from `state.sessionId`. A switch on a tab with nothing said in it therefore restarts **fresh** (the toast says so), and the first `system/init` binds the real session to the profile that was chosen. Nothing is lost, because there was nothing to keep.
 
 ## Traps found while patching
 

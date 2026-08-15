@@ -804,11 +804,18 @@
         }
         if (pendingRestart) return;
 
-        toast('Switching to "' + name + '" — restarting session…');
+        // What is resumed has to be a session the CLI has actually written: the id it announced on
+        // this channel (system/init) or the one this channel was launched to resume. state.sessionId
+        // is deliberately not a fallback — on a tab that has not sent anything yet the page already
+        // holds a provisional id, and resuming that gives "No conversation found with session ID".
+        // A tab with nothing said in it has nothing to lose: it restarts fresh, and the first
+        // system/init binds the real session to the profile.
+        var resume = sessionByChannel[activeChannelId] || (launch && launch.resume) || undefined;
+        toast('Switching to "' + name + '" — ' + (resume ? 'restarting session…' : 'starting fresh…'));
         var job = {
             channelId: activeChannelId,
             conn: conn,
-            resume: sessionByChannel[activeChannelId] || state.sessionId || (launch && launch.resume) || undefined,
+            resume: resume,
             cwd: launch && launch.cwd,
             permissionMode: launch && launch.permissionMode,
             thinkingLevel: launch && launch.thinkingLevel,
