@@ -169,6 +169,8 @@
                 var inner = msg.message;
                 if (inner.type === 'system' && inner.subtype === 'init' && inner.session_id)
                     noteSession(msg.channelId, inner.session_id);
+                if (inner.type === 'system' && inner.subtype === 'compact_boundary')
+                    onCompactBoundary(msg.channelId);
             } else if (msg.type === 'close_channel' && pendingRestart && msg.channelId === pendingRestart.channelId) {
                 var job = pendingRestart;
                 pendingRestart = null;
@@ -811,6 +813,119 @@
         // A tab with nothing said in it has nothing to lose: it restarts fresh, and the first
         // system/init binds the real session to the profile.
         var resume = sessionByChannel[activeChannelId] || (launch && launch.resume) || undefined;
+
+        // A tab with history is offered a compaction first. The prompt cache never survives a provider
+        // change anyway — the next backend has never seen this prefix — so the first turn pays for the
+        // whole transcript either way; sending the compact summary instead of the raw history is the
+        // one lever that makes that first turn cheaper, and it also keeps a longer conversation inside
+        // a smaller window on the other side. It is a question, not a default: compaction discards
+        // detail the user may be about to rely on.
+        if (resume && canCompact()) return offerCompaction(name, resume);
+        performRestart(name, resume);
+    }
+
+    // --- Compact before switching -------------------------------------------------------------
+    //
+    // The compaction is the stock one: the page's own send() with "/compact", the same thing the
+    // command menu does. The CLI answers with a system/compact_boundary on the io_message stream we
+    // already listen to; that is the moment the summary is written and the restart can go ahead. If
+    // it never arrives — the model is stuck, or the turn errors — the switch is not held hostage:
+    // after COMPACT_WAIT_MS it restarts uncompacted and says so.
+    var COMPACT_WAIT_MS = 90000;
+    var pendingCompact = null;
+
+    function activeSession() {
+        var s = ctx && ctx.activeSession && ctx.activeSession.value;
+        return s && typeof s.send === 'function' ? s : null;
+    }
+
+    function canCompact() {
+        var s = activeSession();
+        if (!s) return false;
+        // Nothing to compact on a transcript with no assistant turn yet, and no point asking while a
+        // turn is already running — the compaction would queue behind it.
+        var msgs = s.messages && s.messages.value;
+        var hasAssistant = Array.isArray(msgs) && msgs.some(function (m) { return m && m.type === 'assistant'; });
+        var busy = s.busy && s.busy.value;
+        return hasAssistant && !busy;
+    }
+
+    function offerCompaction(name, resume) {
+        var bar = document.createElement('div');
+        bar.className = 'ccx-toast';
+        var text = document.createElement('span');
+        text.textContent = 'Switching to "' + name + '". Compact the conversation first?';
+        var yes = document.createElement('button');
+        yes.className = 'ccx-toast-btn';
+        yes.textContent = 'Compact & switch';
+        var no = document.createElement('button');
+        no.className = 'ccx-toast-btn ccx-toast-btn-quiet';
+        no.textContent = 'Switch as is';
+        bar.append(text, yes, no);
+        document.body.appendChild(bar);
+        var done = false;
+        var settle = function (compact) {
+            if (done) return;
+            done = true;
+            bar.remove();
+            if (compact) compactThenRestart(name, resume);
+            else performRestart(name, resume);
+        };
+        yes.onclick = function () { settle(true); };
+        no.onclick = function () { settle(false); };
+        // Left unanswered, the switch still happens — the profile was already applied on the host, and
+        // a toast that quietly outlives the decision would leave the tab claiming one provider while
+        // running another.
+        setTimeout(function () { settle(false); }, 20000);
+    }
+
+    function compactThenRestart(name, resume) {
+        var s = activeSession();
+        if (!s) return performRestart(name, resume);
+        toast('Compacting before switching to "' + name + '"…');
+        var job = { name: name, resume: resume, channelId: activeChannelId };
+        job.timer = setTimeout(function () {
+            if (pendingCompact !== job) return;
+            pendingCompact = null;
+            toast('Compaction did not finish — switching to "' + name + '" as is.');
+            performRestart(name, resume);
+        }, COMPACT_WAIT_MS);
+        pendingCompact = job;
+        try {
+            var r = s.send('/compact');
+            if (r && typeof r.catch === 'function') r.catch(function () { onCompactFailed(job); });
+        } catch (err) {
+            onCompactFailed(job);
+        }
+    }
+
+    function onCompactFailed(job) {
+        if (pendingCompact !== job) return;
+        pendingCompact = null;
+        clearTimeout(job.timer);
+        toast('Could not compact — switching to "' + job.name + '" as is.');
+        performRestart(job.name, job.resume);
+    }
+
+    // Called from the io_message listener the moment the CLI reports the boundary
+    function onCompactBoundary(channelId) {
+        var job = pendingCompact;
+        if (!job || job.channelId !== channelId) return;
+        pendingCompact = null;
+        clearTimeout(job.timer);
+        // The boundary is reported before the turn is fully wound down; a short beat lets the summary
+        // land in the transcript before the channel is closed on top of it.
+        setTimeout(function () { performRestart(job.name, job.resume); }, 400);
+    }
+
+    function performRestart(name, resume) {
+        var launch = launchByChannel[activeChannelId];
+        var conn = ctx && ctx.comms && ctx.comms.connection && ctx.comms.connection.value;
+        if (!activeChannelId || !conn || typeof conn.launchClaude !== 'function') {
+            toast('Provider "' + name + '" will apply on the next session launch.');
+            return;
+        }
+        if (pendingRestart) return;
         toast('Switching to "' + name + '" — ' + (resume ? 'restarting session…' : 'starting fresh…'));
         var job = {
             channelId: activeChannelId,
@@ -869,6 +984,7 @@
         'button[data-ccx-provider]::before{content:"";flex:0 0 auto;width:13px;height:13px;margin-right:-3px;border-radius:3px;background-image:var(--ccx-icon);background-size:contain;background-position:center;background-repeat:no-repeat;opacity:.9}',
         '.ccx-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:10001;display:flex;gap:8px;align-items:center;padding:8px 12px;border-radius:6px;font:12px var(--vscode-font-family);color:var(--vscode-notifications-foreground, var(--vscode-foreground));background:var(--vscode-notifications-background, var(--vscode-editorWidget-background));border:1px solid var(--vscode-notificationCenter-border, var(--vscode-widget-border));box-shadow:0 4px 16px rgba(0,0,0,.4)}',
         '.ccx-toast-btn{font:12px var(--vscode-font-family);padding:3px 10px;border-radius:4px;cursor:pointer;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:none}',
+        '.ccx-toast-btn-quiet{color:var(--vscode-button-secondaryForeground, var(--vscode-foreground));background:var(--vscode-button-secondaryBackground, transparent);border:1px solid var(--vscode-button-border, var(--vscode-widget-border))}',
         '.ccx-toast-skip{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}',
         // Above the app's own .previewOverlay (z-index 1e4) and claudapter's toast, since it is opened
         // from a right-click that can land anywhere. Menu colours first, widget colours as the fallback.

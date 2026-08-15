@@ -202,6 +202,10 @@ providers (`qwen`, `deepseek`, `glm`, `minimax`) send `claude-fable-5` verbatim 
 Decision: not worked around — waiting on an upstream fix. Re-check `t5p`/`Rci` in the CLI bundle on
 each version bump; the day `fable:` appears in that `r` object, the direct providers recover it for free.
 
+### Compacting before a switch rides on the stock `/compact`
+
+The offer is a two-button toast; *Compact & switch* calls the page's own `session.send("/compact")` — the same thing the command menu's Compact entry does (`nn=()=>{i("/compact")}` in the composer). The CLI answers on the `io_message` stream with `{type:"system", subtype:"compact_boundary", compact_metadata:{trigger, pre_tokens}}`; the page already listens to that stream for `system/init`, so the boundary is the release for the restart. Two guards keep the switch from being held hostage: a boundary on another channel is ignored, and `COMPACT_WAIT_MS` (90 s) restarts uncompacted with a toast if none arrives. `send()` rejecting does the same at once. The offer itself is not asked when there is nothing to compact — no assistant turn yet, or a turn already running (`session.busy`) — and never on a fresh tab, which starts fresh with nothing to resume. `session.busy.value`, `session.messages.value` and `activeSession.value` are read off the app object the registry hook already hands over; none of them is patched.
+
 ### Menu ordering
 
 The command registry (`class AX` in `webview/index.js`) sorts each section by a hard-coded id list; unknown ids fall to the end:
