@@ -81,6 +81,10 @@ let sendImpl = () => Promise.resolve();
 const session = {
     messages: { value: [{ type: 'user' }, { type: 'assistant' }] },
     busy: { value: false },
+    // The stock "Switch model… → <model>" indicator: filled from the last assistant turn while history
+    // replays for a resume, so after a provider switch it names the OLD provider's model until the new
+    // one answers. Every restart of a switch has to clear it.
+    lastServedModel: { value: 'deepseek-v4-pro' },
     send: (text) => { sends.push(text); return sendImpl(text); },
 };
 const host = {
@@ -119,7 +123,9 @@ no.onclick();
 assert.equal(sends.length, 0, 'switch-as-is must not compact');
 assert.equal(posted.filter((m) => m.type === 'close_channel').length, 1, 'switch-as-is must restart');
 assert.equal(offerBar(), undefined, 'offer must be dismissed');
+assert.equal(session.lastServedModel.value, undefined, 'switch-as-is must forget the served model of the old provider');
 completeRestart();
+session.lastServedModel.value = 'deepseek-v4-pro';
 
 // 3. "Compact & switch" → /compact is sent through the session, restart waits for the boundary.
 reset();
@@ -129,10 +135,12 @@ const yes = bar.children.find((c) => c.tagName === 'button' && /Compact/.test(c.
 yes.onclick();
 assert.deepEqual(sends, ['/compact'], 'must send /compact through the session');
 assert.equal(posted.filter((m) => m.type === 'close_channel').length, 0, 'must not restart before the boundary');
+assert.equal(session.lastServedModel.value, 'deepseek-v4-pro', 'must not touch the indicator before the restart actually goes');
 // The CLI reports the boundary on the channel → restart follows (after the short settle beat).
 fromHost({ type: 'from-extension', message: { type: 'io_message', channelId: 'ch1', message: { type: 'system', subtype: 'compact_boundary' } } });
 fireTimers((t) => t.ms === 400);
 assert.equal(posted.filter((m) => m.type === 'close_channel').length, 1, 'restart must follow the compact boundary');
+assert.equal(session.lastServedModel.value, undefined, 'the restart after compaction must forget the served model');
 // The resume carried through is the real session, so history survives
 completeRestart();
 assert.equal(launches.length, 1, 'launchClaude must be called once');
