@@ -195,7 +195,7 @@ VS Code extension host                     webview (UI)
 | 1 | `extension.js` | `<script nonce="${u}" src="${a}" type="module">` | inline `webview.js` with their nonce + the `ccx:*` channel |
 | 2 | `extension.js` | `…iconPath={light:…,dark:…},….webview.options=` in `setupPanel` | intercept the tab icon |
 | 3 | `extension.js` | `…pathToClaudeCodeExecutable=…,…env=…` + its terminator, in `spawnClaude` | **substitute `ANTHROPIC_*` when the process starts** |
-| 4 | `webview/index.js` | `n.commandRegistry.registerAction({id:"model"` | access their command registry and jsx factory |
+| 4 | `webview/index.js` | *structural* — the three reads before `registerAction({id:"model"` | their command registry, jsx factory **and the session object** |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
 
 ### Sending an attachment on its own

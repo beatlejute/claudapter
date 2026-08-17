@@ -202,6 +202,33 @@ providers (`qwen`, `deepseek`, `glm`, `minimax`) send `claude-fable-5` verbatim 
 Decision: not worked around — waiting on an upstream fix. Re-check `t5p`/`Rci` in the CLI bundle on
 each version bump; the day `fable:` appears in that `r` object, the direct providers recover it for free.
 
+### The session is not reachable from the context object
+
+Injection point #4 used to hand over only the command registry: `onRegistry(n, b)`. That is enough for
+the menu entry, but not for anything that has to *talk to the conversation* — `send()`, `messages`,
+`busy` and `lastServedModel` all live on the session, which is a different class (`MX`) from the
+context object the registry hangs off (`t_e`). Enumerating `t_e` settles it: forty-odd members,
+`forkConversation` and `renameTab` among them, and nothing session-shaped at all. So `ctx.activeSession`
+— the obvious-looking read — is permanently `undefined`, and anything gated on it silently does nothing.
+That is exactly how the compaction offer shipped broken: `canCompact()` returned false every time, so
+the switch never asked, and the `lastServedModel` reset was dead on arrival for the same reason.
+
+Both objects are in scope at the registration, so the signature became structural and passes the
+session too:
+
+```js
+/let (\w+)=(\w+)\.modelSelection\.value,(\w+)=\w+\(\2\.claudeConfig\.value\),(\w+)=\w+\(\1,\2\.lastServedModel\.value,\3\);(\w+)\.commandRegistry\.registerAction\(\{id:"model"/
+```
+
+The three reads in front are what pin the capture to the session rather than to whatever else the
+minifier happens to call `t`, and the back-references keep all three on one object. One match in
+2.1.227–2.1.233, always `session=t, ctx=n`.
+
+A DOM-level test cannot catch a mismatch here on its own — a fake context object carrying an
+`activeSession` field passes while the real one has none, which is precisely how this got through the
+first time. So the test also reads both sources and asserts that the patcher passes a third argument,
+that the hook accepts it, and that the page never reads the session off the context object.
+
 ### Compacting before a switch rides on the stock `/compact`
 
 The offer is a two-button toast; *Compact & switch* calls the page's own `session.send("/compact")` — the same thing the command menu's Compact entry does (`nn=()=>{i("/compact")}` in the composer). The CLI answers on the `io_message` stream with `{type:"system", subtype:"compact_boundary", compact_metadata:{trigger, pre_tokens}}`; the page already listens to that stream for `system/init`, so the boundary is the release for the restart. Two guards keep the switch from being held hostage: a boundary on another channel is ignored, and `COMPACT_WAIT_MS` (90 s) restarts uncompacted with a toast if none arrives. `send()` rejecting does the same at once. The offer itself is not asked when there is nothing to compact — no assistant turn yet, or a turn already running (`session.busy`) — and never on a fresh tab, which starts fresh with nothing to resume. `session.busy.value`, `session.messages.value` and `activeSession.value` are read off the app object the registry hook already hands over; none of them is patched.
