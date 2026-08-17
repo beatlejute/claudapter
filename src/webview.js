@@ -839,6 +839,22 @@
         return s && typeof s.send === 'function' ? s : null;
     }
 
+    // "Switch model… → <model>" in the command menu is the stock indicator of lastServedModel, which the
+    // page fills from the model on the last assistant turn — and it fills it while REPLAYING history
+    // for a resume (loadFromMessages → processMessage per item), before the CLI has said a word. So
+    // after a provider switch it names the model the old provider answered with, until the new one
+    // answers. The stock reset lives in system/init and fires only when the session id changes, which
+    // a --resume never does. Cleared here instead, on every restart of a switch, so the menu shows the
+    // selection rather than a ghost from the transcript.
+    function forgetServedModel() {
+        try {
+            var s = activeSession();
+            if (s && s.lastServedModel && 'value' in s.lastServedModel) s.lastServedModel.value = undefined;
+        } catch (err) {
+            /* an indicator we could not reset is a stale label, not a broken switch */
+        }
+    }
+
     function canCompact() {
         var s = activeSession();
         if (!s) return false;
@@ -926,6 +942,7 @@
             return;
         }
         if (pendingRestart) return;
+        forgetServedModel();
         toast('Switching to "' + name + '" — ' + (resume ? 'restarting session…' : 'starting fresh…'));
         var job = {
             channelId: activeChannelId,
