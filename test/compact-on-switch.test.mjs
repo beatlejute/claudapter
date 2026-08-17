@@ -87,12 +87,15 @@ const session = {
     lastServedModel: { value: 'deepseek-v4-pro' },
     send: (text) => { sends.push(text); return sendImpl(text); },
 };
+// Deliberately WITHOUT activeSession: in the real bundle the session lives on another class entirely
+// (`MX`, while this object is `t_e`) and there is no route to it from here. Reading ctx.activeSession
+// was the bug — it was always undefined, so canCompact() said no and the offer never appeared. The
+// session arrives as onRegistry's third argument, which is what injection point #4 now passes.
 const host = {
     commandRegistry: { registerAction() {}, subscribe() {}, executeCommand() {}, commandActions: new Map() },
     comms: { connection: { value: { launchClaude: (...a) => launches.push(a) } } },
-    activeSession: { value: session },
 };
-ccx.onRegistry(host, () => null);
+ccx.onRegistry(host, () => null, session);
 
 // The page learns the channel from the app's own outgoing launch_claude (through the proxied api)
 const api = context.window.acquireVsCodeApi();
@@ -201,5 +204,21 @@ fromHost({ type: 'ccx:applied', name: 'codex', sessionId: null });
 assert.equal(offerBar(), undefined, 'a fresh tab must not be offered compaction');
 assert.equal(posted.filter((m) => m.type === 'close_channel').length, 1);
 completeRestart('ch2');
+
+// 9. The wiring itself: the patcher must hand the session to onRegistry, and the page must take it
+//    from there rather than from the context object. Read off the sources, because a mismatch between
+//    the two is exactly the failure this file exists to catch and it is invisible at runtime — the
+//    offer just never appears.
+const patcher = readFileSync(new URL('../scripts/apply-patch.mjs', import.meta.url), 'utf8');
+assert.ok(
+    /onRegistry\(\$\{ctx\},b,\$\{session\}\)/.test(patcher),
+    'injection point #4 must pass the session as onRegistry\'s third argument',
+);
+const page = readFileSync(new URL('../src/webview.js', import.meta.url), 'utf8');
+assert.ok(
+    /onRegistry: function \(host, jsxFactory, session\)/.test(page),
+    'onRegistry must accept the session',
+);
+assert.ok(!/ctx\.activeSession/.test(page), 'the session must not be read off the context object — it is not there');
 
 console.log('\nOK — a provider switch offers compaction and every branch still restarts');

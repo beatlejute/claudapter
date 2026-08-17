@@ -21,6 +21,11 @@
     var fallback = null;
     var registry = null;
     var ctx = null;
+    // The session object (messages, busy, lastServedModel, send) — a different class from the context
+    // object, and not reachable from it, so injection point #4 hands it over separately. Re-set on
+    // every registration, which the app re-runs whenever the model selection changes, so a tab that
+    // swaps its session object is followed rather than remembered.
+    var sessionObj = null;
     var jsx = null;
     var chip = null;
     var overlay = null;
@@ -835,7 +840,10 @@
     var pendingCompact = null;
 
     function activeSession() {
-        var s = ctx && ctx.activeSession && ctx.activeSession.value;
+        // The context object (class `t_e`) has no route to the session at all — the session is class
+        // `MX`, and reading an `activeSession` field off the context was the bug: always undefined, so
+        // canCompact() said no and the offer never appeared. It arrives through injection point #4.
+        var s = sessionObj;
         return s && typeof s.send === 'function' ? s : null;
     }
 
@@ -972,7 +980,10 @@
     }
 
     window.__ccx = {
-        onRegistry: function (host, jsxFactory) {
+        onRegistry: function (host, jsxFactory, session) {
+            // The session is refreshed even when the rest is already wired: this hook fires on every
+            // re-registration, and only the first one gets past the guard below.
+            if (session) sessionObj = session;
             if (registry || !host || !host.commandRegistry) return;
             ctx = host;
             registry = host.commandRegistry;

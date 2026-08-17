@@ -50,10 +50,22 @@ const PATCHES = [
         where: 'replace',
     },
     {
+        // The registry alone is not enough: the session — messages, busy, lastServedModel, send() — is a
+        // different object entirely (class `MX`, while the registry hangs off `t_e`), and nothing reachable
+        // from the context object leads to it. Both are in scope right here though, so the signature is
+        // structural and hands the session over as well. Anchoring on the three reads that precede the
+        // registration (`modelSelection`, `claudeConfig`, `lastServedModel`) is what pins the capture to the
+        // session rather than to whatever else the minifier happens to call `t`, and the back-references keep
+        // all three on the same object. One match in 2.1.227–2.1.233, always `session=t, ctx=n`.
         file: 'webview/index.js',
-        find: 'n.commandRegistry.registerAction({id:"model"',
-        insert: '(globalThis.__ccx&&globalThis.__ccx.onRegistry&&globalThis.__ccx.onRegistry(n,b)),',
-        where: 'before',
+        find: /let (\w+)=(\w+)\.modelSelection\.value,(\w+)=\w+\(\2\.claudeConfig\.value\),(\w+)=\w+\(\1,\2\.lastServedModel\.value,\3\);(\w+)\.commandRegistry\.registerAction\(\{id:"model"/,
+        replace: (found, _sel, session, _cfg, _label, ctx) =>
+            found.replace(
+                `${ctx}.commandRegistry.registerAction({id:"model"`,
+                `(globalThis.__ccx&&globalThis.__ccx.onRegistry&&globalThis.__ccx.onRegistry(${ctx},b,${session})),` +
+                    `${ctx}.commandRegistry.registerAction({id:"model"`,
+            ),
+        where: 'replace',
     },
     {
         file: 'webview/index.js',
