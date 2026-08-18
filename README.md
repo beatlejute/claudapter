@@ -173,7 +173,7 @@ If `~/.claude/claudapter/proxy.log` shows `error 403 upstream 403: <html>`, the 
 
 ## How it works
 
-The logic lives **outside** the extension, in `~/.claude/claudapter`. Only five short calls are injected into the bundle, so editing the UI needs no re-patching — a window reload is enough.
+The logic lives **outside** the extension, in `~/.claude/claudapter`. Only eight short calls are injected into the bundle, so editing the UI needs no re-patching — a window reload is enough.
 
 ```
 VS Code extension host                     webview (UI)
@@ -197,6 +197,9 @@ VS Code extension host                     webview (UI)
 | 3 | `extension.js` | `…pathToClaudeCodeExecutable=…,…env=…` + its terminator, in `spawnClaude` | **substitute `ANTHROPIC_*` when the process starts** |
 | 4 | `webview/index.js` | *structural* — the three reads before `registerAction({id:"model"` | their command registry, jsx factory **and the session object** |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
+| 6 | `webview/index.js` | *structural* — the session list's `[query,setQuery]=ne(""),[renaming,…]=ne(null),refs=ge(new Map)` | a second state pair for content-search results, and hands its setter over |
+| 7 | `webview/index.js` | *structural* — the title/branch filter expression that follows it | ORs in a content match, and exposes the unfiltered row list globally |
+| 8 | `webview/index.js` | `onChange:(e)=>J(e.target.value),placeholder:"Search sessions…"` | forwards every keystroke to the host-side transcript search |
 
 ### Sending an attachment on its own
 
@@ -289,6 +292,21 @@ letting it pass unnoticed.
 Recalling the text alone needs none of this — **↑** in an empty composer already cycles your previous
 messages, without touching the conversation.
 
+### Searching sessions by content
+
+The stock search box in the session list only matches a row's title and git branch, both already
+computed client-side. A query that names something you actually *said* usually is not either, so this
+adds a second, lazy pass: once the title/branch filter comes up short (or a query is simply typed),
+the ids currently on screen are sent to the extension host, which greps each one's `.jsonl` transcript
+on disk and reports back which ones actually contain it — no JSON parsing, the query sits in the
+encoded message text either way. The two passes merge: a row shows up if it matches on title, branch,
+**or** content.
+
+It stays out of the hot path deliberately. Typing is debounced 250ms before anything is sent, every
+new keystroke clears the previous result immediately so a stale match never lingers under a new query,
+and each session's transcript text is cached on disk mtime so re-searching an unchanged session costs
+nothing. Only the **Local** tab is covered — remote/cloud sessions have no on-disk transcript to grep.
+
 A detailed teardown of the extension is in [docs/internals.md](docs/internals.md).
 
 ### Choosing the profile at launch
@@ -311,7 +329,7 @@ Keys "owned" by profiles are computed as the union of every `env` across `~/.cla
 
 VS Code installs the new version into a separate folder, so the patch is gone. Re-run `node scripts/install.mjs` and reload the window. If the signatures changed in the new bundle, the patcher stops with an explicit error naming the mismatch instead of corrupting anything.
 
-`scripts/apply-patch.mjs` warns when the installed extension version differs from the one in `package.json`, but it is only a warning — a signature that still matches is still applied. The minified locals are the fragile part, so injection point #3 matches the *shape* of the assignment rather than the names; the other four are anchored to string literals that survive minification.
+`scripts/apply-patch.mjs` warns when the installed extension version differs from the one in `package.json`, but it is only a warning — a signature that still matches is still applied. The minified locals are the fragile part, so most points match the *shape* of the code around them rather than the names; only #1 and #5 are anchored to string literals that survive minification unchanged.
 
 ### Version branches
 

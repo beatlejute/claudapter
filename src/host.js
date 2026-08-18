@@ -239,16 +239,66 @@ const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 // found with session ID …". The disk is the only source that cannot be early, so it is the one that
 // decides. Scanned across all project folders, because the id is unique and the slug is not ours to
 // reconstruct.
-function transcriptExists(sessionId) {
-    if (!sessionId || !/^[0-9a-f-]{36}$/i.test(sessionId)) return false;
+function transcriptPathFor(sessionId) {
+    if (!sessionId || !/^[0-9a-f-]{36}$/i.test(sessionId)) return null;
     let dirs = [];
     try {
         dirs = fs.readdirSync(PROJECTS_DIR);
     } catch {
-        return false;
+        return null;
     }
-    for (const d of dirs) if (fs.existsSync(path.join(PROJECTS_DIR, d, sessionId + '.jsonl'))) return true;
-    return false;
+    for (const d of dirs) {
+        const file = path.join(PROJECTS_DIR, d, sessionId + '.jsonl');
+        if (fs.existsSync(file)) return file;
+    }
+    return null;
+}
+
+function transcriptExists(sessionId) {
+    return transcriptPathFor(sessionId) !== null;
+}
+
+// --- Content search for the session picker --------------------------------------------------
+//
+// The stock search box only matches a row's title and git branch, both already in memory for every
+// visible row. Matching the conversation itself means reading the transcript, so it stays a separate,
+// lazy pass: the webview sends the ids it currently has on screen, keyed on a search query, and this
+// greps each one's raw .jsonl text — no JSON parsing, the query sits in the encoded message content
+// either way and parsing every line just to throw the structure away buys nothing.
+//
+// Cached per session on mtime+size, because the picker searches on every keystroke's pause and a
+// transcript that has not changed since the last one costs nothing to check again. Capped rather than
+// left to grow: transcripts run from a few KB to several MB, and a long-lived window that has searched
+// its way through a large history should not end up holding all of it in memory at once.
+const MAX_CACHED_TRANSCRIPTS = 200;
+
+function transcriptSearchText(sessionId) {
+    const file = transcriptPathFor(sessionId);
+    if (!file) return null;
+    const cache = (S.transcriptTextCache ||= new Map());
+    try {
+        const { mtimeMs, size } = fs.statSync(file);
+        const hit = cache.get(sessionId);
+        if (hit && hit.mtimeMs === mtimeMs && hit.size === size) return hit.lower;
+        const lower = fs.readFileSync(file, 'utf8').toLowerCase();
+        if (cache.size >= MAX_CACHED_TRANSCRIPTS) cache.delete(cache.keys().next().value);
+        cache.set(sessionId, { mtimeMs, size, lower });
+        return lower;
+    } catch {
+        return null;
+    }
+}
+
+function searchTranscripts(query, sessionIds) {
+    const needle = (query || '').toLowerCase().trim();
+    if (!needle || !Array.isArray(sessionIds)) return [];
+    const out = [];
+    for (const id of sessionIds) {
+        if (typeof id !== 'string') continue;
+        const text = transcriptSearchText(id);
+        if (text && text.includes(needle)) out.push(id);
+    }
+    return out;
 }
 
 function envFor(baseEnv, resumeSessionId, opts) {
@@ -874,6 +924,8 @@ function attachWebview(webview) {
             } catch (e) {
                 vscode.window.showErrorMessage(`Provider switch failed: ${e.message}`);
             }
+        } else if (m.type === 'ccx:searchContent') {
+            post(webview, { type: 'ccx:searchResults', seq: m.seq, matches: searchTranscripts(m.query, m.sessionIds) });
         }
     });
 

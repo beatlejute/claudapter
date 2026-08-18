@@ -74,6 +74,52 @@ const PATCHES = [
             '["ccx-provider","model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]/*__ccx*/',
         where: 'replace',
     },
+    // --- Search sessions by content (three hooks in the same session-list component) -------------
+    //
+    // The stock search box only matches a row's title and git branch, both computed client-side. A
+    // query the user actually typed to find a conversation is usually neither — it is something that
+    // was SAID — so this adds a second, lazy pass over the transcript itself, run on the host. All
+    // three anchors sit in the same component (the one rendering "Search sessions…"), captured
+    // structurally because a `$`-prefixed parameter name (`$e`) needs `[\w$]+`, not `\w+`, to survive
+    // the round trip; a plain `\w+` silently fails to match on this component and nowhere else.
+    {
+        // Right where the search query's own state is declared: adds a second state pair for the
+        // ids the host reports back, and hands its setter to the page in the same expression, the same
+        // way injection point #4 hands over the registry and session.
+        file: 'webview/index.js',
+        find: /,\[([\w$]+),([\w$]+)\]=ne\(""\),\[([\w$]+),([\w$]+)\]=ne\(null\),([\w$]+)=ge\(new Map\)/,
+        replace: (_found, query, setQuery, renaming, setRenaming, refs) =>
+            `,[${query},${setQuery}]=ne(""),[ccxContentMatches,ccxSetContentMatches]=ne(null),` +
+            `ccxHandoff=(globalThis.__ccx&&globalThis.__ccx.onSearchState&&globalThis.__ccx.onSearchState(ccxSetContentMatches)),` +
+            `[${renaming},${setRenaming}]=ne(null),${refs}=ge(new Map)`,
+        where: 'replace',
+    },
+    {
+        // The title/branch filter itself: OR in a content match, and expose the unfiltered candidate
+        // list globally in the same expression — the onChange hook below needs it, and this is the one
+        // place its variable name (`te`, but renamed on every release) is already in scope and captured.
+        file: 'webview/index.js',
+        find: /([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3/,
+        replace: (_found, result, query, source, item, lowerQ, titleFn) =>
+            `${result}=(globalThis.__ccxSearchCandidates=${source},${query}?${source}.filter((${item})=>{` +
+            `let ${lowerQ}=${query}.toLowerCase();return ${titleFn}(${item}).toLowerCase().includes(${lowerQ})||` +
+            `(${item}.gitBranch.value?.toLowerCase().includes(${lowerQ})??!1)||` +
+            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)}):${source})`,
+        where: 'replace',
+    },
+    {
+        // The search input: forwards every keystroke to the host lookup, on top of the stock J(...).
+        // Reads the candidate list back off globalThis rather than a captured variable name, since the
+        // list is computed a different statement away from the input and re-anchoring across that span
+        // would be one large, fragile match instead of two small ones.
+        file: 'webview/index.js',
+        find: /onChange:\(([\w$]+)\)=>([\w$]+)\(\1\.target\.value\),placeholder:"Search sessions…"/,
+        replace: (_found, param, setter) =>
+            `onChange:(${param})=>{${setter}(${param}.target.value);` +
+            `globalThis.__ccx&&globalThis.__ccx.onSearchQuery&&globalThis.__ccx.onSearchQuery(${param}.target.value,` +
+            `(globalThis.__ccxSearchCandidates||[]).map((s)=>s.sessionId.value))},placeholder:"Search sessions…"`,
+        where: 'replace',
+    },
 ];
 
 // Things the injected code drives without patching them. Losing one is not an error — claudapter
