@@ -229,6 +229,60 @@ A DOM-level test cannot catch a mismatch here on its own — a fake context obje
 first time. So the test also reads both sources and asserts that the patcher passes a third argument,
 that the hook accepts it, and that the page never reads the session off the context object.
 
+### Content search reuses the session-list handoff — and needs `$` in its identifier class
+
+Points #6–#8 sit in the same session-list component as #4, and exist for the same reason: the row
+array and the title filter are local to that component, so anything wanting to widen the filter has
+to be injected right where they already live, not called in from outside.
+
+`\w` does not match `$`, and this component’s row parameter is `$e` — a plain `\w+` capture group
+matches zero times here and nowhere else in the 4.7 MB bundle, which is a quiet way to fail: no
+error, just a signature that happens to sit at hit-count 0 instead of 1 and gets caught by
+`apply-patch.mjs`’s count check rather than by the regex itself. `[\w$]+` is what every capture group
+in points #6–#8 uses instead.
+
+Point #6 is the state declaration, anchored on the exact sequence the query state, the rename-target
+state and the per-row ref map already form:
+
+```js
+,\[([\w$]+),([\w$]+)\]=ne\(""\),\[([\w$]+),([\w$]+)\]=ne\(null\),([\w$]+)=ge\(new Map\)
+```
+
+It inserts a second state pair — the ids the host reports back — right after the query state, and
+hands its setter to `globalThis.__ccx.onSearchState` in the same expression, the same trick point #4
+uses for the registry and session.
+
+Point #7 is the filter expression itself:
+
+```js
+([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3
+```
+
+It ORs in a content match, and — in the same expression, via the comma operator — assigns the
+unfiltered row array to `globalThis.__ccxSearchCandidates`. That assignment is the only reason point
+#8 does not need to capture the row array’s own name: it is a different statement, a good way down
+the same component, and re-anchoring across that whole span for one variable would trade two small,
+independent matches for one large, fragile one. Reading it off `globalThis` instead costs nothing —
+the component re-runs the assignment on every render, so the global is never more than one render
+stale, and the value is only ever read synchronously, inside the same render’s own event handlers.
+
+Point #8 is the search input’s `onChange`, anchored on the literal `placeholder:"Search sessions…"`
+that follows it — the one piece of this trio that survives minification unchanged, because it is
+user-facing text:
+
+```js
+onChange:\(([\w$]+)\)=>([\w$]+)\(\1\.target\.value\),placeholder:"Search sessions…"
+```
+
+It forwards every keystroke to `globalThis.__ccx.onSearchQuery` alongside the id list read off the
+global above. `src/webview.js` owns everything from there: a 250 ms debounce, an immediate clear of
+the previous result on every keystroke (so a slow answer to an abandoned query can never outlive the
+query it answered), and a sequence number that drops any answer that is not for the newest request.
+The host side greps each requested session’s raw `.jsonl` text case-insensitively rather than parsing
+it — the query sits in the encoded message content either way, and parsing every line just to throw
+the structure away would buy nothing — and caches the lowercased text per session on file mtime, so a
+session unchanged since the last keystroke costs nothing to check again.
+
 ### Compacting before a switch rides on the stock `/compact`
 
 The offer is a two-button toast; *Compact & switch* calls the page's own `session.send("/compact")` — the same thing the command menu's Compact entry does (`nn=()=>{i("/compact")}` in the composer). The CLI answers on the `io_message` stream with `{type:"system", subtype:"compact_boundary", compact_metadata:{trigger, pre_tokens}}`; the page already listens to that stream for `system/init`, so the boundary is the release for the restart. Two guards keep the switch from being held hostage: a boundary on another channel is ignored, and `COMPACT_WAIT_MS` (90 s) restarts uncompacted with a toast if none arrives. `send()` rejecting does the same at once. The offer itself is not asked when there is nothing to compact — no assistant turn yet, or a turn already running (`session.busy`) — and never on a fresh tab, which starts fresh with nothing to resume. `session.busy.value`, `session.messages.value` and `activeSession.value` are read off the app object the registry hook already hands over; none of them is patched.

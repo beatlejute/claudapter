@@ -33,6 +33,9 @@
     var sessionByChannel = {};
     var activeChannelId = null;
     var pendingRestart = null;
+    var searchSetter = null;
+    var searchSeq = 0;
+    var searchDebounceTimer = null;
 
     function send(message) {
         rawPost(message);
@@ -205,6 +208,10 @@
         } else if (d.type === 'ccx:applied') {
             if (d.sessionId && !state.sessionId) state.sessionId = d.sessionId;
             restartChannel(d.name);
+        } else if (d.type === 'ccx:searchResults') {
+            // A later keystroke may already have moved past this — only the newest request's answer counts.
+            if (d.seq !== searchSeq || !searchSetter) return;
+            searchSetter(d.matches && d.matches.length ? new Set(d.matches) : null);
         }
     });
 
@@ -979,6 +986,34 @@
         }
     }
 
+    // --- Search sessions by content ------------------------------------------------------------
+    //
+    // The stock search box matches only a row's title and git branch, both already sitting in the
+    // page. Matching the conversation itself needs the transcript, which the page does not hold for
+    // rows outside the active tab — so title/branch matching stays instant and client-side, and a
+    // query additionally goes to the host, which greps each visible session's file on disk and
+    // reports back which ones actually contain it. The session list patch (injection point #4) hands
+    // over the candidate ids and a setter for the result; this only debounces the request and the
+    // response, so a fast typist does not fire one lookup per keystroke.
+    //
+    // Every call clears the previous result immediately, before scheduling anything: without that, a
+    // stale Set from the last query would keep matching sessions under the new one for as long as the
+    // debounce takes to resolve.
+    function onSearchState(setter) {
+        searchSetter = setter;
+    }
+
+    function onSearchQuery(query, sessionIds) {
+        clearTimeout(searchDebounceTimer);
+        var mySeq = ++searchSeq;
+        if (searchSetter) searchSetter(null);
+        var q = (query || '').trim();
+        if (!q) return;
+        searchDebounceTimer = setTimeout(function () {
+            send({ type: 'ccx:searchContent', query: q, sessionIds: sessionIds || [], seq: mySeq });
+        }, 250);
+    }
+
     window.__ccx = {
         onRegistry: function (host, jsxFactory, session) {
             // The session is refreshed even when the rest is already wired: this hook fires on every
@@ -991,6 +1026,8 @@
             syncAction();
             syncChip();
         },
+        onSearchState: onSearchState,
+        onSearchQuery: onSearchQuery,
     };
 
     // styles
