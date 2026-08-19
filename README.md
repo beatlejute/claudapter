@@ -1,7 +1,7 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.234**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.235**.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -37,7 +37,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.234**; the signatures also match 2.1.220–2.1.233)
+- The `anthropic.claude-code` extension installed (verified against **2.1.235**; the signatures also match 2.1.220–2.1.234)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
@@ -337,7 +337,8 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 
 | Branch | Extension | What the minifier called the locals |
 |---|---|---|
-| `main` | 2.1.234 — newest | `f.env=v;`, `light:s,dark:s` |
+| `main` | 2.1.235 — newest | `f.env=v;`, `light:s,dark:s` |
+| `v2.1.235` | 2.1.235 | `f.env=v;`, `light:s,dark:s` |
 | `v2.1.234` | 2.1.234 | `f.env=v;`, `light:s,dark:s` |
 | `v2.1.233` | 2.1.233 | `f.env=v;`, `light:s,dark:s` |
 | `v2.1.232` | 2.1.232 | `f.env=v;`, `light:s,dark:s` |
