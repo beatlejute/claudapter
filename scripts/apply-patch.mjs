@@ -85,13 +85,15 @@ const PATCHES = [
     {
         // Right where the search query's own state is declared: adds a second state pair for the
         // ids the host reports back, and hands its setter to the page in the same expression, the same
-        // way injection point #4 hands over the registry and session.
+        // way injection point #4 hands over the registry and session. The useState alias itself is
+        // captured too (2.1.233: `ne`, 2.1.235: `ie`) rather than hardcoded — it is just a local like
+        // any other, and the minifier is free to call it something else on the next release.
         file: 'webview/index.js',
-        find: /,\[([\w$]+),([\w$]+)\]=ne\(""\),\[([\w$]+),([\w$]+)\]=ne\(null\),([\w$]+)=ge\(new Map\)/,
-        replace: (_found, query, setQuery, renaming, setRenaming, refs) =>
-            `,[${query},${setQuery}]=ne(""),[ccxContentMatches,ccxSetContentMatches]=ne(null),` +
+        find: /,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=ge\(new Map\)/,
+        replace: (_found, query, setQuery, useState, renaming, setRenaming, refs) =>
+            `,[${query},${setQuery}]=${useState}(""),[ccxContentMatches,ccxSetContentMatches]=${useState}(null),` +
             `ccxHandoff=(globalThis.__ccx&&globalThis.__ccx.onSearchState&&globalThis.__ccx.onSearchState(ccxSetContentMatches)),` +
-            `[${renaming},${setRenaming}]=ne(null),${refs}=ge(new Map)`,
+            `[${renaming},${setRenaming}]=${useState}(null),${refs}=ge(new Map)`,
         where: 'replace',
     },
     {

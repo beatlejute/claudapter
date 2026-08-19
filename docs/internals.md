@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current for **2.1.234**, whose bundle is byte-for-byte the same shape — every patch signature matched unchanged, so nothing here was re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.235**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` (see "Content search reuses the session-list handoff" below) — but nothing else here changed, so the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -245,12 +245,19 @@ Point #6 is the state declaration, anchored on the exact sequence the query stat
 state and the per-row ref map already form:
 
 ```js
-,\[([\w$]+),([\w$]+)\]=ne\(""\),\[([\w$]+),([\w$]+)\]=ne\(null\),([\w$]+)=ge\(new Map\)
+,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=ge\(new Map\)
 ```
 
 It inserts a second state pair — the ids the host reports back — right after the query state, and
 hands its setter to `globalThis.__ccx.onSearchState` in the same expression, the same trick point #4
 uses for the registry and session.
+
+The `useState` alias itself (`ne` in 2.1.233–2.1.234, `ie` in 2.1.235) is captured rather than
+hardcoded, the same reasoning as everywhere else in this file: it is one local among many, and the
+minifier renamed it the very next release. The first version of this signature hardcoded it, and
+2.1.235 broke on exactly that — `ge(new Map)` (the ref map, from `useRef`) held steady while `ne`
+became `ie`, which is the general shape of these breaks: never every local at once, always some
+subset, and never predictably which one.
 
 Point #7 is the filter expression itself:
 

@@ -1,6 +1,6 @@
 {
     "name": "claudapter",
-    "version": "2.1.234",
+    "version": "2.1.235",
     "private": true,
     "type": "module",
     "description": "Per-tab API provider switching inside the Claude Code for VS Code UI, with an Anthropic-to-OpenAI protocol adapter",
