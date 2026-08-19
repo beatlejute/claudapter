@@ -79,6 +79,103 @@ function readJson(file) {
     }
 }
 
+// The built-in Claude Code checker is rendered only by its terminal UI; the VS Code composer does not
+// receive its results. This bridge runs the same local Hunspell dictionary from the extension host and
+// returns only the misspelled tokens, never the complete draft or anything over the network.
+const SPELLCHECK_MAX_WORDS = 200;
+const SPELLCHECK_MAX_WORD_LENGTH = 80;
+const SPELLCHECK_TIMEOUT_MS = 1500;
+
+function spellcheckConfig() {
+    const config = readJson(SETTINGS_FILE)?.spellcheck;
+    if (!config || config.enabled !== true) return null;
+    if (config.checker && config.checker !== 'hunspell' && config.checker !== 'auto') return null;
+    return { language: typeof config.language === 'string' && config.language ? config.language : null };
+}
+
+function hunspellPath() {
+    // winget puts its user-facing command links here. Fall back to PATH for other installers and OSes.
+    const link =
+        process.platform === 'win32' && process.env.LOCALAPPDATA
+            ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links', 'hunspell.exe')
+            : null;
+    return link && fs.existsSync(link) ? link : 'hunspell';
+}
+
+function checkedWords(words) {
+    const config = spellcheckConfig();
+    if (!config || !Array.isArray(words)) return Promise.resolve(null);
+    const accepted = [];
+    for (const word of words) {
+        if (
+            typeof word === 'string' &&
+            word.length > 1 &&
+            word.length <= SPELLCHECK_MAX_WORD_LENGTH &&
+            /^[А-Яа-яЁё]+$/.test(word) &&
+            !accepted.includes(word)
+        ) {
+            accepted.push(word);
+            if (accepted.length === SPELLCHECK_MAX_WORDS) break;
+        }
+    }
+    if (!accepted.length) return Promise.resolve({ unknown: new Set(), suggestions: {} });
+
+    const args = [];
+    if (config.language) args.push('-d', config.language);
+    // -a emits one machine-readable line per word, including suggestions for misspellings.
+    args.push('-a');
+    return new Promise((resolve) => {
+        let done = false;
+        let stdout = '';
+        let child;
+        let timer = null;
+        const finish = (result) => {
+            if (done) return;
+            done = true;
+            if (timer) clearTimeout(timer);
+            resolve(result);
+        };
+        try {
+            child = spawn(hunspellPath(), args, { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+        } catch {
+            finish(null);
+            return;
+        }
+        timer = setTimeout(() => {
+            child.kill();
+            finish(null);
+        }, SPELLCHECK_TIMEOUT_MS);
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => {
+            stdout += chunk;
+            if (stdout.length > 64 * 1024) {
+                child.kill();
+                finish(null);
+            }
+        });
+        child.once('error', () => finish(null));
+        child.once('close', (code) => {
+            if (code !== 0) return finish(null);
+            const unknown = new Set();
+            const suggestions = {};
+            for (const line of stdout.split(/\r?\n/)) {
+                const match = /^&\s+(\S+)\s+\d+\s+\d+:\s*(.*)$/.exec(line);
+                if (!match) continue;
+                const word = match[1].toLowerCase();
+                unknown.add(word);
+                const list = match[2]
+                    .split(',')
+                    .map((item) => item.trim())
+                    .filter((item) => /^[А-Яа-яЁё]+$/.test(item))
+                    .slice(0, 5);
+                if (list.length) suggestions[word] = list;
+            }
+            finish({ unknown, suggestions });
+        });
+        child.stdin.end(accepted.join('\n') + '\n', 'utf8');
+    });
+}
+
 function writeJson(file, data) {
     try {
         fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -1032,6 +1129,17 @@ function attachWebview(webview) {
             }
         } else if (m.type === 'ccx:searchContent') {
             post(webview, { type: 'ccx:searchResults', seq: m.seq, matches: searchTranscripts(m.query, m.sessionIds) });
+        } else if (m.type === 'ccx:spellcheck') {
+            // The request contains a bounded, de-duplicated list of Russian words, not the draft. Do
+            // not log it: a prompt can contain names, hostnames or other sensitive project context.
+            checkedWords(m.words).then((result) => {
+                post(webview, {
+                    type: 'ccx:spellcheckResult',
+                    seq: typeof m.seq === 'number' ? m.seq : null,
+                    unknown: result ? [...result.unknown] : null,
+                    suggestions: result ? result.suggestions : null,
+                });
+            });
         } else if (m.type === 'ccx:timestamps') {
             const id = m.sessionId || sessionId;
             post(webview, { type: 'ccx:timestampsResult', sessionId: id, times: transcriptTimestamps(id) || {} });

@@ -36,6 +36,12 @@
     var searchSetter = null;
     var searchSeq = 0;
     var searchDebounceTimer = null;
+    var spellcheckSeq = 0;
+    var spellcheckTimer = null;
+    var spellcheckComposer = null;
+    var spellcheckText = '';
+    var spellcheckUnknown = new Set();
+    var spellcheckSuggestions = {};
     // uuid -> epoch ms, straight from the session's .jsonl. The page's own message.timestamp cannot be
     // trusted for anything but a live turn: its class defaults that field to Date.now(), and replayed
     // history is rebuilt without one, so a resumed transcript reports "now" for every past message.
@@ -231,6 +237,8 @@
             // A later keystroke may already have moved past this — only the newest request's answer counts.
             if (d.seq !== searchSeq || !searchSetter) return;
             searchSetter(d.matches && d.matches.length ? new Set(d.matches) : null);
+        } else if (d.type === 'ccx:spellcheckResult') {
+            applySpellcheckResult(d);
         } else if (d.type === 'ccx:timestampsResult') {
             if (d.sessionId !== messageTimesSession) return;
             messageTimes = d.times || {};
@@ -563,6 +571,7 @@
                 decorateSessionList();
                 decorateTranscript();
                 applyHidden();
+                watchComposerSpellcheck();
                 syncAttachmentPrompt();
                 syncResumePrompt();
             }, 60);
@@ -600,6 +609,170 @@
     // execCommand that fires their `oninput`.
     function composerEl() {
         return document.querySelector('[role="textbox"][aria-label="Message input"]');
+    }
+
+    // VS Code starts this webview with Chromium spellchecking disabled, and Claude Code's own checker
+    // only decorates its terminal UI. The host therefore checks a bounded list of Russian words with
+    // local Hunspell. Custom Highlight ranges decorate the React-owned source nodes without wrapping or
+    // editing them, which keeps the app's input state, selection and undo history intact.
+    function clearSpellcheckHighlights() {
+        if (window.CSS && CSS.highlights) CSS.highlights.delete('ccx-spelling');
+    }
+
+    function spellcheckTokens(el) {
+        var text = el.textContent || '';
+        var tokens = [];
+        var match;
+        var words = /[А-Яа-яЁё]{2,}/g;
+        while ((match = words.exec(text))) {
+            var word = match[0].toLowerCase();
+            tokens.push({ word: word, start: match.index, end: match.index + match[0].length });
+        }
+        return { text: text, tokens: tokens };
+    }
+
+    function spellcheckTextNodes(el) {
+        var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        var nodes = [];
+        var start = 0;
+        var node;
+        while ((node = walker.nextNode())) {
+            var end = start + node.nodeValue.length;
+            nodes.push({ node: node, start: start, end: end });
+            start = end;
+        }
+        return nodes;
+    }
+
+    function spellcheckPoint(nodes, offset) {
+        for (var i = 0; i < nodes.length; i++) {
+            if (offset <= nodes[i].end) return { node: nodes[i].node, offset: offset - nodes[i].start };
+        }
+        return null;
+    }
+
+    function spellcheckOffsetAtPoint(el, x, y) {
+        var range = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
+        if (!range && document.caretPositionFromPoint) {
+            var position = document.caretPositionFromPoint(x, y);
+            if (position) {
+                range = document.createRange();
+                range.setStart(position.offsetNode, position.offset);
+                range.collapse(true);
+            }
+        }
+        if (!range || !el.contains(range.startContainer)) return null;
+        var before = document.createRange();
+        before.selectNodeContents(el);
+        before.setEnd(range.startContainer, range.startOffset);
+        return before.toString().length;
+    }
+
+    function spellcheckTokenAtPoint(el, x, y) {
+        var offset = spellcheckOffsetAtPoint(el, x, y);
+        if (offset === null) return null;
+        var tokens = spellcheckTokens(el).tokens;
+        for (var i = 0; i < tokens.length; i++) {
+            if (offset >= tokens[i].start && offset <= tokens[i].end && spellcheckUnknown.has(tokens[i].word)) {
+                return tokens[i];
+            }
+        }
+        return null;
+    }
+
+    function replaceSpellcheckToken(el, token, replacement) {
+        var point = spellcheckPoint(spellcheckTextNodes(el), token.start);
+        var end = spellcheckPoint(spellcheckTextNodes(el), token.end);
+        if (!point || !end) return false;
+        var range = document.createRange();
+        range.setStart(point.node, point.offset);
+        range.setEnd(end.node, end.offset);
+        var selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        el.focus();
+        return document.execCommand('insertText', false, replacement);
+    }
+
+    function onComposerSpellcheckContextMenu(e) {
+        var el = composerEl();
+        if (!el || !el.contains(e.target) || el !== spellcheckComposer || (el.textContent || '') !== spellcheckText) return;
+        var token = spellcheckTokenAtPoint(el, e.clientX, e.clientY);
+        var suggestions = token && Array.isArray(spellcheckSuggestions[token.word]) ? spellcheckSuggestions[token.word] : [];
+        if (!suggestions.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        openMenu(e.clientX, e.clientY, suggestions.slice(0, 5).map(function (suggestion) {
+            return menuItem(suggestion, function () {
+                if (!replaceSpellcheckToken(el, token, suggestion)) toast('Не удалось заменить слово.');
+            });
+        }));
+    }
+
+    function applySpellcheckResult(result) {
+        if (result.seq !== spellcheckSeq || !Array.isArray(result.unknown)) return;
+        var el = spellcheckComposer;
+        if (!el || el !== composerEl() || (el.textContent || '') !== spellcheckText) return;
+
+        spellcheckUnknown = new Set(result.unknown.map(function (word) { return word.toLowerCase(); }));
+        spellcheckSuggestions = result.suggestions && typeof result.suggestions === 'object' ? result.suggestions : {};
+        if (!window.CSS || !CSS.highlights || typeof Highlight !== 'function') return;
+        var unknown = spellcheckUnknown;
+        var tokens = spellcheckTokens(el).tokens;
+        var nodes = spellcheckTextNodes(el);
+        var ranges = [];
+        for (var i = 0; i < tokens.length; i++) {
+            if (!unknown.has(tokens[i].word)) continue;
+            var start = spellcheckPoint(nodes, tokens[i].start);
+            var end = spellcheckPoint(nodes, tokens[i].end);
+            if (!start || !end) continue;
+            var range = document.createRange();
+            range.setStart(start.node, start.offset);
+            range.setEnd(end.node, end.offset);
+            ranges.push(range);
+        }
+        if (ranges.length) CSS.highlights.set('ccx-spelling', new Highlight(...ranges));
+        else clearSpellcheckHighlights();
+    }
+
+    function runSpellcheck() {
+        var el = composerReady();
+        clearSpellcheckHighlights();
+        if (!el) return;
+        var parsed = spellcheckTokens(el);
+        if (!parsed.tokens.length) return;
+        var words = [];
+        var seen = new Set();
+        for (var i = 0; i < parsed.tokens.length && words.length < 200; i++) {
+            if (seen.has(parsed.tokens[i].word)) continue;
+            seen.add(parsed.tokens[i].word);
+            words.push(parsed.tokens[i].word);
+        }
+        spellcheckComposer = el;
+        spellcheckText = parsed.text;
+        send({ type: 'ccx:spellcheck', seq: ++spellcheckSeq, words: words });
+    }
+
+    function queueSpellcheck() {
+        clearTimeout(spellcheckTimer);
+        spellcheckUnknown = new Set();
+        spellcheckSuggestions = {};
+        clearSpellcheckHighlights();
+        spellcheckTimer = setTimeout(runSpellcheck, 450);
+    }
+
+    function watchComposerSpellcheck() {
+        var el = composerEl();
+        if (!el || el.dataset.ccxSpellcheck) return;
+        el.dataset.ccxSpellcheck = '1';
+        el.addEventListener('input', queueSpellcheck);
+        el.addEventListener('contextmenu', onComposerSpellcheckContextMenu, true);
+        el.addEventListener('compositionstart', function () {
+            clearTimeout(spellcheckTimer);
+            clearSpellcheckHighlights();
+        });
+        el.addEventListener('compositionend', queueSpellcheck);
+        queueSpellcheck();
     }
 
     // While a permission request is pending the app sets `display:none` on the composer's container.
@@ -1490,6 +1663,9 @@
         '.ccx-menu-item:hover{color:var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground));background:var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground))}',
         '.ccx-menu-disabled{opacity:.45;pointer-events:none}',
         '.ccx-menu-sep{height:1px;margin:4px 6px;background:var(--vscode-menu-separatorBackground, var(--vscode-widget-border, rgba(128,128,128,.35)))}',
+        // The composer glyphs are transparent because the app paints a sibling mirror. A Custom Highlight
+        // still paints this text decoration in the input layer, without changing React-owned markup.
+        '::highlight(ccx-spelling){background-color:rgba(255,85,85,.16);text-decoration-line:underline;text-decoration-style:wavy;text-decoration-color:#ff5555;text-decoration-thickness:1px}',
         // A retracted message (and the hidden "ignore it" turn) is dropped by a data attribute rather
         // than an inline style, so a React re-render of the bubble cannot bring it back.
         '[data-ccx-hidden]{display:none !important}',
@@ -1505,12 +1681,14 @@
         syncChip();
         decorateSessionList();
         decorateTranscript();
+        watchComposerSpellcheck();
         watchPicker();
     } else {
         document.addEventListener('DOMContentLoaded', function () {
             syncChip();
             decorateSessionList();
             decorateTranscript();
+            watchComposerSpellcheck();
             watchPicker();
         });
     }
