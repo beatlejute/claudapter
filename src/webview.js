@@ -36,6 +36,11 @@
     var searchSetter = null;
     var searchSeq = 0;
     var searchDebounceTimer = null;
+    // uuid -> epoch ms, straight from the session's .jsonl. The page's own message.timestamp cannot be
+    // trusted for anything but a live turn: its class defaults that field to Date.now(), and replayed
+    // history is rebuilt without one, so a resumed transcript reports "now" for every past message.
+    var messageTimes = {};
+    var messageTimesSession = null;
 
     function send(message) {
         rawPost(message);
@@ -197,10 +202,24 @@
                 sessionId: d.sessionId || state.sessionId,
             };
             adoptAttachmentPrompts(d.attachmentPrompts);
+            // Retracted uuids arrive from the host; a session change resets the set, otherwise the
+            // host's list merges in (the host only ever adds, so local in-flight additions survive).
+            if (state.sessionId !== hiddenSession) {
+                hiddenSession = state.sessionId;
+                hiddenUuids = new Set();
+                pendingRetractBefore = null;
+                pendingRetractText = null;
+                pendingRetractIdx = -1;
+                pendingRetractResponse = false;
+            }
+            if (Array.isArray(d.hiddenMessages))
+                for (var hi = 0; hi < d.hiddenMessages.length; hi++) hiddenUuids.add(d.hiddenMessages[hi]);
             syncAction();
             syncChip();
             decorateModelPicker();
             decorateSessionList();
+            decorateTranscript();
+            applyHidden();
         } else if (d.type === 'ccx:icons') {
             icons = d.icons || {};
             fallback = d.fallback || null;
@@ -212,6 +231,10 @@
             // A later keystroke may already have moved past this — only the newest request's answer counts.
             if (d.seq !== searchSeq || !searchSetter) return;
             searchSetter(d.matches && d.matches.length ? new Set(d.matches) : null);
+        } else if (d.type === 'ccx:timestampsResult') {
+            if (d.sessionId !== messageTimesSession) return;
+            messageTimes = d.times || {};
+            decorateTranscript();
         }
     });
 
@@ -353,6 +376,184 @@
         }
     }
 
+    // --- Message timestamps, chat-app style --------------------------------------------------
+    //
+    // Each transcript turn is rendered from a `message` prop — {type, uuid, content, timestamp, …} —
+    // carried straight from the .jsonl line that produced it, which is not otherwise exposed anywhere
+    // in the DOM or in ccx:state. The same fiber read as sessionIdOfRow gets it: no signal unwrapping
+    // needed here, `message` is a plain object, not a signal.
+    //
+    // Written as data-* + a CSS pseudo-element, the same way the session-list provider mark is: a real
+    // child node risks React's own reconciliation of that bubble (most of all the assistant one, which
+    // keeps re-rendering while a turn is still streaming) clobbering it on the next commit, where a
+    // data attribute on the node React already owns survives untouched.
+    // 'timestamp' in message alone is not enough to trust an object found this way — walking up through
+    // memoized props of intermediate wrappers can surface something else entirely that happens to carry
+    // a field of that name (a live status/notification object, for one, which is exactly why every
+    // bubble was showing the same near-current time instead of its own). A transcript message has this
+    // whole shape together; nothing else plausibly does.
+    function isTranscriptMessage(message) {
+        return (
+            message &&
+            typeof message === 'object' &&
+            (message.type === 'user' || message.type === 'assistant') &&
+            typeof message.uuid === 'string' &&
+            Array.isArray(message.content) &&
+            message.timestamp !== undefined &&
+            message.timestamp !== null
+        );
+    }
+
+    function messagePropOf(node) {
+        var key = fiberKeyOf(node);
+        var fiber = key ? node[key] : null;
+        // Deeper than sessionIdOfRow's four hops — that one only has to clear the registry component;
+        // this has to clear whatever wraps the specific content-block renderer inside a turn, which
+        // varies with how many layers a given block type (text, tool use, thinking) happens to add.
+        for (var d = 0; fiber && d < 10; d++, fiber = fiber.return) {
+            var message = fiber.memoizedProps && fiber.memoizedProps.message;
+            if (isTranscriptMessage(message)) return message;
+        }
+        return null;
+    }
+
+    function formatMessageTime(date) {
+        try {
+            return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(date);
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function dayKey(date) {
+        return date.getFullYear() + '-' + date.getMonth() + '-' + date.getDate();
+    }
+
+    // "Today" / "Yesterday" through Intl.RelativeTimeFormat rather than a hand-rolled table — it is
+    // already locale-correct, and every language this needs it in is one the runtime already knows.
+    function formatDaySeparator(date) {
+        var today = new Date();
+        var diffDays = Math.round(
+            (new Date(today.getFullYear(), today.getMonth(), today.getDate()) -
+                new Date(date.getFullYear(), date.getMonth(), date.getDate())) /
+                86400000
+        );
+        if (diffDays === 0 || diffDays === 1) {
+            try {
+                return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(-diffDays, 'day');
+            } catch (e) {
+                /* fall through to a plain date */
+            }
+        }
+        try {
+            var opts =
+                date.getFullYear() === today.getFullYear()
+                    ? { day: 'numeric', month: 'long' }
+                    : { day: 'numeric', month: 'long', year: 'numeric' };
+            return new Intl.DateTimeFormat(undefined, opts).format(date);
+        } catch (e) {
+            return date.toDateString();
+        }
+    }
+
+    // The .jsonl is fetched once per session. Live turns are not in it yet and do not need to be:
+    // a message created in this page during this session carries a real Date.now() from its own
+    // construction, so the in-page value is right for exactly the messages the file lacks.
+    function ensureMessageTimes() {
+        var id = state.sessionId;
+        if (!id || id === messageTimesSession) return;
+        messageTimesSession = id;
+        messageTimes = {};
+        send({ type: 'ccx:timestamps', sessionId: id });
+    }
+
+    function messageDate(message) {
+        if (!message) return null;
+        var ms = message.uuid ? messageTimes[message.uuid] : undefined;
+        var date = ms ? new Date(ms) : message.timestamp ? new Date(message.timestamp) : null;
+        return date && !isNaN(date.getTime()) ? date : null;
+    }
+
+    // Real child nodes, not pseudo-elements. An assistant bubble has BOTH of its pseudo-element slots
+    // spoken for by the app itself: `.timelineMessage_:before` is the coloured status dot, and
+    // `.timelineMessage_:after` is the vertical timeline rail — with `top:18px` on the first message of
+    // a run, `height:18px` on the last, and `display:none` on a lone one. Generating content into
+    // either slot silently replaces that, which is what first stretched the rail and then lost it
+    // outright. Nothing about them may be touched, so the timestamp needs nodes of its own.
+    //
+    // Appended rather than prepended: React reconciles by walking references it already holds, and an
+    // unknown node at the end stays out of the way of its insertBefore calls. Position is decided in
+    // CSS instead — the time is absolute, the date pill uses flex `order` — so neither depends on where
+    // in the child list it actually sits. If a commit does drop one, the MutationObserver pass puts it
+    // back within its 60 ms debounce.
+    function ensureLabel(node, className, tag) {
+        for (var i = 0; i < node.children.length; i++)
+            if (node.children[i].className === className) return node.children[i];
+        var el = document.createElement(tag);
+        el.className = className;
+        node.appendChild(el);
+        return el;
+    }
+
+    function dropLabel(node, className) {
+        for (var i = 0; i < node.children.length; i++)
+            if (node.children[i].className === className) {
+                node.children[i].remove();
+                return;
+            }
+    }
+
+    function decorateTranscript() {
+        try {
+            ensureMessageTimes();
+            // Same selector interruptIsCurrent() already reads the transcript with — document order,
+            // both message kinds.
+            var nodes = document.querySelectorAll('[data-testid="assistant-message"], [class*="userMessageContainer_"]');
+            var prevDay = null;
+            // Some bubbles render a second matching container inside themselves, and both fibers lead to
+            // the same message — decorating both printed the same time twice, one directly under the
+            // other. Document order guarantees an ancestor is seen before its descendant, so keeping the
+            // outermost of each nest is enough.
+            var decorated = [];
+            for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                var nested = false;
+                for (var j = 0; j < decorated.length; j++)
+                    if (decorated[j].contains(node)) {
+                        nested = true;
+                        break;
+                    }
+                var date = nested ? null : messageDate(messagePropOf(node));
+                if (!date) {
+                    delete node.dataset.ccxTime;
+                    delete node.dataset.ccxDate;
+                    dropLabel(node, 'ccx-msg-time');
+                    dropLabel(node, 'ccx-msg-date');
+                    continue;
+                }
+                decorated.push(node);
+                var time = formatMessageTime(date);
+                // The attribute is what opens the gutter in CSS; the node is what fills it.
+                if (node.dataset.ccxTime !== time) node.dataset.ccxTime = time;
+                var timeEl = ensureLabel(node, 'ccx-msg-time', 'span');
+                if (timeEl.textContent !== time) timeEl.textContent = time;
+                var key = dayKey(date);
+                if (key !== prevDay) {
+                    var label = formatDaySeparator(date);
+                    if (node.dataset.ccxDate !== label) node.dataset.ccxDate = label;
+                    var dateEl = ensureLabel(node, 'ccx-msg-date', 'div');
+                    if (dateEl.textContent !== label) dateEl.textContent = label;
+                } else if (node.dataset.ccxDate) {
+                    delete node.dataset.ccxDate;
+                    dropLabel(node, 'ccx-msg-date');
+                }
+                prevDay = key;
+            }
+        } catch (e) {
+            /* no timestamps is a plainer transcript, not a broken one */
+        }
+    }
+
     function watchPicker() {
         var timer = null;
         new MutationObserver(function () {
@@ -360,6 +561,8 @@
             timer = setTimeout(function () {
                 decorateModelPicker();
                 decorateSessionList();
+                decorateTranscript();
+                applyHidden();
                 syncAttachmentPrompt();
                 syncResumePrompt();
             }, 60);
@@ -485,8 +688,9 @@
         var keys = ['image', 'images', 'attachment', 'attachments'];
         for (var i = 0; i < keys.length; i++) if (typeof next[keys[i]] !== 'string' || !next[keys[i]]) return;
         ATTACHMENT_PROMPTS = next;
-        // The resume prompt rides on the same payload.
+        // The resume and retract prompts ride on the same payload.
         if (typeof next.resume === 'string' && next.resume) RESUME_PROMPT = next.resume;
+        if (typeof next.retract === 'string' && next.retract) RETRACT_TEMPLATE = next.retract;
     }
 
     var promptedForAttachments = false;
@@ -670,47 +874,257 @@
         document.addEventListener('mousedown', onMenuOutside, true);
     }
 
-    // --- Rewind ---------------------------------------------------------------------------------
+    // --- Retract the last message -------------------------------------------------------------
     //
-    // The app already does all of this. Its "Rewind to…" picker lists your own messages newest first
-    // with the last one already selected, and confirming restores the file checkpoint, forks the
-    // conversation at that message and puts its text back in the composer to edit. What it lacks is a
-    // way in: the action sits in the command menu under "Context" and nothing points at it.
-    //
-    // So this adds the gesture, not the feature — the same action, run through the registry's own
-    // executeCommand. Going through their action rather than their internals keeps the confirmation
-    // dialog, and with it the summary of which files a rewind would touch.
-    var REWIND_ACTION = 'rewind';
+    // The stock "Rewind to…" picker restores a file checkpoint, forks the conversation and puts the
+    // text back in the composer — a fork, which is exactly what this replaces. Retracting keeps the
+    // session: the erroneous message and the assistant's answer to it are hidden from the transcript,
+    // and the agent is told — under the hood, in a user turn that is hidden the moment it renders —
+    // that the message was a mistake and should be ignored. The turn stays in the .jsonl, so the agent
+    // keeps the context; only the view drops it. The hidden uuids are persisted per session on the
+    // host, so a resume re-hides them and content search skips them.
+    var RETRACT_TEMPLATE = 'The message «%s» was a mistake — ignore it and your response to it.';
+    var RETRACT_QUOTE_LEN = 200;
+    var hiddenUuids = new Set();
+    var hiddenSession = null;
+    // The retract accounts for two more turns than the one being retracted: the hidden "ignore it"
+    // instruction, and the assistant's answer to it (which would otherwise dangle as an orphan reply
+    // to nothing). The instruction's uuid is only knowable once send() has appended the turn, so these
+    // fields track the search until both turns are found and hidden.
+    var pendingRetractBefore = null;      // messages.value index where the instruction turn should land
+    var pendingRetractText = null;        // the instruction text, a backstop if the index shifts
+    var pendingRetractIdx = -1;           // the instruction turn's index, once found
+    var pendingRetractResponse = false;   // true while the instruction's answer is still to hide
 
-    function rewindAvailable() {
-        if (!registry || typeof registry.executeCommand !== 'function') return false;
-        // registerAction files the handler in commandActions under the action id, and executeCommand
-        // is a silent no-op for an id that is gone. Ask first, so a renamed action means the item is
-        // absent rather than present and dead.
-        if (registry.commandActions && typeof registry.commandActions.has === 'function')
-            return registry.commandActions.has(REWIND_ACTION);
-        return Boolean(registry.findCommandByLabel && registry.findCommandByLabel('Rewind'));
+    function messageText(m) {
+        if (!m || !Array.isArray(m.content)) return '';
+        var parts = [];
+        for (var i = 0; i < m.content.length; i++) {
+            var b = m.content[i];
+            // A message's content is an array of the app's block wrappers (class Bp), not the raw
+            // blocks — the raw block sits one level down at block.content ({type:"text", text}). The
+            // string branch guards the app's older string-content shape (its LX constructor).
+            var block = b && b.content;
+            if (typeof block === 'string') { parts.push(block); continue; }
+            if (block && block.type === 'text' && typeof block.text === 'string') parts.push(block.text);
+        }
+        return parts.join('\n');
     }
 
-    function openRewind() {
+    // The last message the user actually sent — the one "taking back the last message" refers to.
+    // isSynthetic marks the app's own injected turns, which are not the user's to retract.
+    function lastUserMessage() {
+        var s = activeSession();
+        if (!s) return null;
+        var msgs = s.messages && s.messages.value;
+        if (!Array.isArray(msgs)) return null;
+        for (var i = msgs.length - 1; i >= 0; i--) {
+            var m = msgs[i];
+            // A retracted turn is already accounted for — the previous message is the one the user
+            // gets to take back next.
+            if (m && m.type === 'user' && !m.isSynthetic && !(m.uuid && hiddenUuids.has(m.uuid)))
+                return { index: i, uuid: m.uuid, text: messageText(m) };
+        }
+        return null;
+    }
+
+    function canRetract() {
+        var s = activeSession();
+        if (!s) return false;
+        if (s.busy && s.busy.value) return false;
+        return lastUserMessage() !== null;
+    }
+
+    function persistHidden(uuids) {
+        if (!uuids || !uuids.length) return;
+        send({ type: 'ccx:hideMessages', sessionId: state.sessionId, uuids: uuids });
+    }
+
+    function hideNow(uuids) {
+        var fresh = [];
+        for (var i = 0; i < uuids.length; i++) {
+            if (typeof uuids[i] === 'string' && !hiddenUuids.has(uuids[i])) {
+                hiddenUuids.add(uuids[i]);
+                fresh.push(uuids[i]);
+            }
+        }
+        if (fresh.length) persistHidden(fresh);
+        applyHidden();
+    }
+
+    // Pull the erroneous message back into the composer for editing — this is the "edit the last
+    // message" half of the gesture. Writing textContent directly replaces whatever draft was already
+    // there (retract means "rewrite that message", not "append to what I was typing"), and matches the
+    // app's own setInputText (`st`): it assigns ne.current.textContent = ae and syncs the draft signal.
+    // execCommand must NOT be used here: insertText on a contenteditable="plaintext-only" box only
+    // lands when a live, collapsed selection is in place, and the select-all + delete that would clear
+    // the old draft leaves that selection invalid — insertText then reports success while the DOM stays
+    // empty, so the field reads blank. A direct textContent write always lands; the synthetic input
+    // below makes the app's onInput (`os`) read it back and sync the draft signal, so the app's
+    // "clear the composer when the draft is empty" effect (`if(ne.current&&v==="")…`) does not wipe it.
+    function replaceComposerText(text) {
+        var el = composerReady();
+        if (!el) return false;
+        el.focus();
+        el.textContent = text;
+        var range = document.createRange();
+        var sel = window.getSelection();
+        if (sel) {
+            range.selectNodeContents(el);
+            range.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(range);
+        }
+        if (typeof el.dispatchEvent === 'function') {
+            var evt;
+            try {
+                evt = new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text });
+            } catch (err) {
+                evt = null;
+            }
+            if (!evt) {
+                try { evt = new Event('input', { bubbles: true }); } catch (err2) { evt = null; }
+            }
+            if (evt) el.dispatchEvent(evt);
+        }
+        return true;
+    }
+
+    function retractLastMessage() {
+        var s = activeSession();
+        if (!s) return toast('No active session.');
+        if (s.busy && s.busy.value) return toast('Wait for the current response before retracting.');
+        var last = lastUserMessage();
+        if (!last) return toast('Nothing to retract.');
+
+        // Everything from the erroneous message to the end of the list is the failed exchange: the
+        // message itself and whatever the agent answered to it.
+        var msgs = s.messages.value;
+        var toHide = [];
+        for (var i = last.index; i < msgs.length; i++) {
+            var m = msgs[i];
+            if (m && typeof m.uuid === 'string') toHide.push(m.uuid);
+        }
+        var quote = (last.text || '').replace(/\s+/g, ' ').trim();
+        if (quote.length > RETRACT_QUOTE_LEN) quote = quote.slice(0, RETRACT_QUOTE_LEN) + '…';
+        var instruction = RETRACT_TEMPLATE.replace('%s', quote || '…');
+
+        hideNow(toHide);
+        // Put the message back in the composer so it can be corrected and re-sent; the instruction
+        // below is what tells the agent to ignore the old copy it still holds in context.
+        if (last.text && !replaceComposerText(last.text))
+            toast('Retracted — paste the message text into the composer to resend.');
+
+        // The instruction's own uuid is only knowable once send() has appended the turn. applyHidden
+        // resolves it the moment the turn lands — here, when the send settles, and again from the DOM
+        // observer — and then hides the instruction's answer the moment it appears. The pending state
+        // is cleared by applyHidden, not by the send resolving, so the turn can never outlive its own
+        // hiding.
+        pendingRetractBefore = msgs.length;
+        pendingRetractText = instruction;
+
+        var sent;
         try {
-            registry.executeCommand(REWIND_ACTION);
+            sent = s.send(instruction);
         } catch (err) {
-            console.warn('ccx: rewind failed', err);
-            toast('Could not open Rewind.');
+            pendingRetractBefore = null;
+            pendingRetractText = null;
+            toast('Could not retract the message.');
+            return;
+        }
+        if (sent && typeof sent.then === 'function') {
+            sent.then(
+                function () { applyHidden(); },
+                function () {
+                    pendingRetractBefore = null;
+                    pendingRetractText = null;
+                    toast('Could not retract the message.');
+                },
+            );
+            // If the turn never materialises (a send that settles in an unusual way), let the pending
+            // state expire rather than hide an unrelated later message.
+            window.setTimeout(function () {
+                if (pendingRetractBefore !== null) {
+                    pendingRetractBefore = null;
+                    pendingRetractText = null;
+                }
+            }, 30000);
+        }
+    }
+
+    // Three jobs, called from the DOM observer and from ccx:state. First it accounts for the retract's
+    // own turns — the hidden "ignore it" instruction, then the assistant's answer to it — by finding
+    // their uuids in messages.value the moment they appear; then it hides every message whose uuid is
+    // in the set. Hiding rides on a data attribute rather than inline style, the same way the
+    // timestamps do — an assistant bubble keeps re-rendering while a turn streams.
+    function applyHidden() {
+        var s = activeSession();
+        var msgs = s && s.messages && s.messages.value;
+        if (pendingRetractBefore !== null && Array.isArray(msgs)) {
+            for (var fi = pendingRetractBefore; fi < msgs.length; fi++) {
+                var m = msgs[fi];
+                if (!m || m.type !== 'user' || typeof m.uuid !== 'string') continue;
+                // The turn lands exactly where the retract left off; the text check is a backstop for
+                // any array reshuffling between the capture and the append.
+                if (fi !== pendingRetractBefore && messageText(m) !== pendingRetractText) continue;
+                pendingRetractIdx = fi;
+                pendingRetractBefore = null;
+                pendingRetractText = null;
+                pendingRetractResponse = true;
+                if (!hiddenUuids.has(m.uuid)) {
+                    hiddenUuids.add(m.uuid);
+                    persistHidden([m.uuid]);
+                }
+                break;
+            }
+        }
+        if (pendingRetractResponse && Array.isArray(msgs)) {
+            for (var ai = pendingRetractIdx + 1; ai < msgs.length; ai++) {
+                var a = msgs[ai];
+                if (!a || typeof a.uuid !== 'string') continue;
+                if (a.type === 'assistant') {
+                    pendingRetractResponse = false;
+                    if (!hiddenUuids.has(a.uuid)) {
+                        hiddenUuids.add(a.uuid);
+                        persistHidden([a.uuid]);
+                    }
+                    break;
+                }
+            }
+        }
+        try {
+            var nodes = document.querySelectorAll('[data-testid="assistant-message"], [class*="userMessageContainer_"]');
+            var seen = [];
+            for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                var msg = messagePropOf(node);
+                if (!msg) continue;
+                // Document order puts an ancestor before its descendant, so keeping only the
+                // outermost node of each message hides the whole bubble once, the way the timestamp
+                // pass keeps the outermost bubble for its label.
+                var nested = false;
+                for (var j = 0; j < seen.length; j++)
+                    if (seen[j].contains(node)) { nested = true; break; }
+                if (nested) continue;
+                seen.push(node);
+                if (msg.uuid && hiddenUuids.has(msg.uuid)) node.setAttribute('data-ccx-hidden', '');
+                else node.removeAttribute('data-ccx-hidden');
+            }
+        } catch (e) {
+            /* a message that cannot be hidden is one that stays visible */
         }
     }
 
     // Ctrl+Shift+Z. In a contenteditable that is redo, so the composer gives redo up for this — undo
     // is untouched, and what redo would restore there is a line of prose. It is a trade, not a free
-    // key, which is also why the event is only swallowed when there is actually a picker to open.
-    function onRewindKey(e) {
+    // key, which is also why the event is only swallowed when there is actually a message to retract.
+    function onRetractKey(e) {
         if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
         if ((e.key || '').toLowerCase() !== 'z') return;
-        if (!rewindAvailable()) return;
+        if (!canRetract()) return;
         e.preventDefault();
         e.stopPropagation();
-        openRewind();
+        retractLastMessage();
     }
 
     function rangeHasPoint(range, x, y) {
@@ -773,9 +1187,9 @@
             // Reached with no selection too, which is the point: over a transcript the stock menu is
             // three inert entries, so replacing it costs nothing there. The composer is outside
             // messagesContainer_ and keeps its own menu, which is the one where Paste matters.
-            if (rewindAvailable()) {
+            if (activeSession()) {
                 if (items.length) items.push(menuSeparator());
-                items.push(menuItem('Rewind…', openRewind));
+                items.push(menuItem('Retract last message', retractLastMessage));
             }
             if (!items.length) return;
 
@@ -806,7 +1220,7 @@
         document.addEventListener('contextmenu', onContextMenu, true);
         // Same reason for the capture phase, and it has to be the window: the composer stops some keys
         // at its own handler, and the composer is exactly where you are when you want this.
-        window.addEventListener('keydown', onRewindKey, true);
+        window.addEventListener('keydown', onRetractKey, true);
     }
 
     function restartChannel(name) {
@@ -1028,6 +1442,7 @@
         },
         onSearchState: onSearchState,
         onSearchQuery: onSearchQuery,
+        retract: retractLastMessage,
     };
 
     // styles
@@ -1047,6 +1462,23 @@
         // The row is display:flex;align-items:center;gap:8px, so ::before simply becomes its leading flex
         // item and the flex:1 title still ellipsizes. No child node, so nothing for React to reconcile.
         'button[data-ccx-provider]::before{content:"";flex:0 0 auto;width:13px;height:13px;margin-right:-3px;border-radius:3px;background-image:var(--ccx-icon);background-size:contain;background-position:center;background-repeat:no-repeat;opacity:.9}',
+        // A gutter, not a line of its own: pinned into the left margin the time sits beside the
+        // message's opening line and costs no height at all, which is what the stock tool-call rows
+        // already look like — rail, dot, time, content.
+        //
+        // Note what is NOT here: any ::before or ::after on the message itself. Both slots belong to
+        // the app — `.timelineMessage_:before` is the status dot, `.timelineMessage_:after` is the
+        // vertical rail (top:18px first in a run, height:18px last, display:none when alone). Writing
+        // to either replaces it, which stretched the rail and then lost it. The labels are real child
+        // nodes instead, and every stock rule about the rail keeps applying untouched.
+        '[data-ccx-time]{padding-left:84px}',
+        // Absolute labels keep the stock message layout and timeline untouched. A date-bearing bubble
+        // reserves a small header inside itself, so the separator never floats over the previous bubble.
+        '.ccx-msg-time{position:absolute;left:24px;top:8px;width:52px;height:1.5em;display:flex;align-items:center;white-space:nowrap;font-size:11px;line-height:1;opacity:.55;font-variant-numeric:tabular-nums;user-select:none;pointer-events:none}',
+        '.ccx-msg-date{position:absolute;left:50%;top:4px;transform:translateX(-50%);width:fit-content;max-width:90%;white-space:nowrap;margin:0;padding:2px 10px;border-radius:10px;font-size:11px;text-align:center;opacity:.6;background:var(--vscode-badge-background);user-select:none}',
+        // The date occupies this bubble's header; the time then stays beside the first content line.
+        '[data-ccx-date]{padding-top:34px}',
+        '[data-ccx-date] .ccx-msg-time{top:42px}',
         '.ccx-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:10001;display:flex;gap:8px;align-items:center;padding:8px 12px;border-radius:6px;font:12px var(--vscode-font-family);color:var(--vscode-notifications-foreground, var(--vscode-foreground));background:var(--vscode-notifications-background, var(--vscode-editorWidget-background));border:1px solid var(--vscode-notificationCenter-border, var(--vscode-widget-border));box-shadow:0 4px 16px rgba(0,0,0,.4)}',
         '.ccx-toast-btn{font:12px var(--vscode-font-family);padding:3px 10px;border-radius:4px;cursor:pointer;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:none}',
         '.ccx-toast-btn-quiet{color:var(--vscode-button-secondaryForeground, var(--vscode-foreground));background:var(--vscode-button-secondaryBackground, transparent);border:1px solid var(--vscode-button-border, var(--vscode-widget-border))}',
@@ -1058,6 +1490,9 @@
         '.ccx-menu-item:hover{color:var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground));background:var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground))}',
         '.ccx-menu-disabled{opacity:.45;pointer-events:none}',
         '.ccx-menu-sep{height:1px;margin:4px 6px;background:var(--vscode-menu-separatorBackground, var(--vscode-widget-border, rgba(128,128,128,.35)))}',
+        // A retracted message (and the hidden "ignore it" turn) is dropped by a data attribute rather
+        // than an inline style, so a React re-render of the bubble cannot bring it back.
+        '[data-ccx-hidden]{display:none !important}',
     ].join('');
     document.head.appendChild(s);
 
@@ -1069,11 +1504,13 @@
     if (document.body) {
         syncChip();
         decorateSessionList();
+        decorateTranscript();
         watchPicker();
     } else {
         document.addEventListener('DOMContentLoaded', function () {
             syncChip();
             decorateSessionList();
+            decorateTranscript();
             watchPicker();
         });
     }

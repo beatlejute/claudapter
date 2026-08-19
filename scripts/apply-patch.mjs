@@ -127,13 +127,10 @@ const PATCHES = [
 // Things the injected code drives without patching them. Losing one is not an error — claudapter
 // fails closed, the menu item is simply absent — but it is silent, and this is the only place the
 // disappearance is visible before a user notices the gesture stopped working.
-const EXPECTATIONS = [
-    {
-        file: 'webview/index.js',
-        find: 'registerAction({id:"rewind"',
-        what: 'the Rewind action — the "Rewind…" menu item and Ctrl+Shift+Z open it by id',
-    },
-];
+//
+// The retract gesture no longer depends on the stock Rewind action (it talks to the session object
+// that injection point #4 already hands over), so there are currently no expectations to check.
+const EXPECTATIONS = [];
 
 const MARKER = '__ccx';
 

@@ -30,6 +30,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
 - **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
+- **Message timestamps** — every turn in the transcript gets a small local time, chat-app style, and a date separator ("Today", "Yesterday", or the date) wherever the day changes. Read straight off each message's own `.jsonl` timestamp, so it reflects when the turn actually happened, not when it rendered.
 - **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
 - **Send an image with no text** — attaching a file to an empty composer writes a short prompt into it (`Analyse the image in the context of this conversation`, agreeing with what is actually attached), which is what makes the send button light up. It is a normal draft: edit it, replace it, or just press Enter. The wording follows `language` from `/config`; to reword a language, edit its row in `LANGUAGES` in [src/host.js](src/host.js).
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
@@ -261,7 +262,7 @@ Claudapter does that only for a right-click inside the transcript and draws its 
 everywhere else — the composer included — the stock menu is untouched, which is what matters, because
 the composer is where Paste means something. Over a transcript the stock entries are inert anyway.
 Because the suppression takes the stock **Copy** with it, the replacement menu carries Copy itself.
-*Quote selection* and *Copy* appear only when something is selected; *Rewind…* always does.
+*Quote selection* and *Copy* appear only when something is selected; *Retract last message* always does.
 
 This is the project's only dependency on VS Code rather than on the extension, so it is on the
 re-verification list: `resources/app/out/vs/workbench/contrib/webview/browser/pre/index.html`. If that
@@ -269,28 +270,28 @@ early-return ever goes away the failure is two menus at once, not a loud error.
 
 ### Taking back the last message
 
-The extension already has all of this, and claudapter adds no part of it. Its *Rewind to…* picker
-lists your own messages newest first with the last one selected, and confirming restores the file
-checkpoint, forks the conversation at that message and puts its text back in the composer to edit:
+The stock *Rewind to…* picker restores a file checkpoint, **forks** the conversation and puts the text
+back in the composer to edit. Claudapter replaces that with a **retract** that keeps the session: the
+erroneous message and the assistant's answer to it are hidden from the transcript, the text is pulled
+back into the composer to correct and re-send, and the agent is told — under the hood, in a user turn
+that is itself hidden — that the message was a mistake and should be ignored. The turns stay in the
+transcript (the agent keeps the context); only the view drops them.
 
-```js
-C = await session.rewindCode(uuid)                          // files
-app.forkConversation(sessionId, promptText, resumeAtMessageId)  // history, and the text to edit
-```
+The gesture is **Ctrl+Shift+Z**, and *Retract last message* in the right-click menu. Retracting:
 
-What it lacked was a way in — the action lives in the command menu under *Context*. So claudapter
-adds the gesture only: **Ctrl+Shift+Z**, and *Rewind…* in the right-click menu. Both call
-`registry.executeCommand('rewind')` on the command registry the provider chip is already registered
-against, so no new signature is involved and their confirmation dialog — including the summary of
-which files a rewind would touch — is still the thing that decides.
+1. hides the last user message and whatever the agent answered to it;
+2. puts that message's text back into the composer, so it can be corrected and re-sent;
+3. sends the agent a hidden English instruction — *«<message>» was a mistake, ignore it and your
+   response to it* — and hides that turn **and** the assistant's answer to it, so no retract machinery
+   ever shows in the chat;
+4. the answer you see next is the agent's response to your corrected message.
+
+The hidden uuids are persisted per session in `~/.claude/claudapter/hidden-messages.json`, so a resume
+re-hides them, and content search skips them. Retracting is refused while a turn is still running.
 
 Two costs worth knowing. Ctrl+Shift+Z is **redo** inside the composer, and that is what it gives up;
-Ctrl+Z is untouched. And the action id `rewind` is their code, not ours: if it is renamed, the menu
-item disappears and the key goes back to redo, which `npm run apply` reports as a NOTE rather than
-letting it pass unnoticed.
-
-Recalling the text alone needs none of this — **↑** in an empty composer already cycles your previous
-messages, without touching the conversation.
+Ctrl+Z is untouched. And recalling the text alone needs none of this — **↑** in an empty composer
+already cycles your previous messages, without touching the conversation.
 
 ### Searching sessions by content
 

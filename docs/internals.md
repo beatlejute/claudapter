@@ -294,6 +294,16 @@ session unchanged since the last keystroke costs nothing to check again.
 
 The offer is a two-button toast; *Compact & switch* calls the page's own `session.send("/compact")` — the same thing the command menu's Compact entry does (`nn=()=>{i("/compact")}` in the composer). The CLI answers on the `io_message` stream with `{type:"system", subtype:"compact_boundary", compact_metadata:{trigger, pre_tokens}}`; the page already listens to that stream for `system/init`, so the boundary is the release for the restart. Two guards keep the switch from being held hostage: a boundary on another channel is ignored, and `COMPACT_WAIT_MS` (90 s) restarts uncompacted with a toast if none arrives. `send()` rejecting does the same at once. The offer itself is not asked when there is nothing to compact — no assistant turn yet, or a turn already running (`session.busy`) — and never on a fresh tab, which starts fresh with nothing to resume. `session.busy.value`, `session.messages.value` and `activeSession.value` are read off the app object the registry hook already hands over; none of them is patched.
 
+### `send()` has no hidden-message flag — retract hides via the DOM
+
+`send(text, …)` (`async send(e,t,i,n,o)` on the session class) always builds a `{type:"user", uuid:crypto.randomUUID(), …}` turn, appends it to `messages.value` and pushes it to the CLI with `h.sendInput(u, l, !1)`. There is no `hidden`/`isMeta` option in that path — the bundle's own injected turns (`askDebuggerHelp()`, `enableJupyterMcp()`) are ordinary visible user messages, and `isMeta` does not appear in `webview/index.js` at all (it is a CLI-side transcript flag). So the retract gesture cannot ask the page to send an invisible turn; it sends the "ignore it" instruction through the ordinary `send()` and then hides its bubble — and the retracted exchange's bubbles — by a `data-ccx-hidden` attribute read off the same `messagePropOf` fiber walk the timestamps use.
+
+The retract accounts for three turns, not one: the erroneous message and the assistant's answer (hidden immediately), the instruction turn, and the assistant's answer to *it* (an orphan reply to nothing, hidden too). The instruction's `uuid` is only knowable once `send()` has appended it, so the page tracks `pendingRetractBefore` (the `messages.value` index where the turn should land), resolves it the moment the turn appears — from the DOM observer and again from the `send()` promise's settle — and then hides the first `type:"assistant"` turn after it. The pending state is cleared by that resolution, *not* by `send()` resolving, which is what keeps the instruction from ever lingering visible: `send()` appends the turn to `messages.value` before its promise settles, so a `.then` that nulled the index would lose the race and leave the bubble showing forever.
+
+The retracted text also goes back into the composer for editing. `replaceComposerText` writes `textContent` directly — the same way the app's own `setInputText` does (`ne.current.textContent = ae; _(ae)`) — because `execCommand("insertText")` on a `contenteditable="plaintext-only"` box only lands when a live, collapsed selection is in place, and the select-all + delete that would clear the old draft leaves that selection invalid, so the text silently never appears. A direct write always lands, and a synthetic `input` event dispatched after it makes the app's `onInput` (`os`) read the text back and sync the draft signal (`v`), so the app's `se(()=>{ if(ne.current&&v==="") ne.current.textContent="" },[v])` effect does not wipe the fill.
+
+Reading the text back out was the subtler half of the bug: `messages.value` entries are `Fp` objects whose `content` is an array of `Bp` wrappers, each holding the real block one level down — the text is `block.content.text`, not `block.text` (the bundle's own `LX` builds `new Bp({type:"text", text})`, and `Fp.isEmpty` reads `e.content`). `messageText` must therefore unwrap `b.content`; a flat `b.type`/`b.text` reads `undefined`, so `last.text` came back empty and the composer was never filled. The instruction wording is deliberately **not** localised like the attachment/resume prompts are — those are written into the visible composer and must read like the user's own prose, while the instruction is hidden machinery and the extension's UI is English, so `host.js` sends the same English sentence for every `/config` language. The hidden uuids are persisted in `~/.claude/claudapter/hidden-messages.json` so a resume re-hides them, and the host's content search parses the `.jsonl` per line (only for sessions that have retracted something) so a retracted message stops matching.
+
 ### The stock model indicator names the last provider that answered
 
 `Switch model… → <model>` in the command menu is the extension's own `modelIndicator`, fed by `session.lastServedModel`. That signal is written in `processMessage` from `e.message.model` on every assistant turn — and `loadFromMessages` runs `processMessage` over the whole transcript while seeding a resume, before the CLI has said a word. So after a provider switch the menu says, truthfully but misleadingly, which model the *old* provider answered with, until the new one answers. The stock reset is in the `system/init` branch and fires only when `session_id` changes, which a `--resume` never does. `performRestart` therefore clears `lastServedModel.value` on every switch, so the menu falls back to the selection.
@@ -346,6 +356,75 @@ inline `style` are not React-managed on that button and survive. The row is
 The list is reachable at all because `resolveSessionListView` builds the sidebar view through the *same*
 `getHtmlForWebview` as the chat panel — the injected script is already present in both surfaces, so this
 needed no sixth injection point.
+
+### Message timestamps read the same stale-prone fiber, on purpose
+
+Each transcript bubble (`data-testid="assistant-message"`, or the `userMessageContainer_` div) is rendered
+from a `message` prop — `{type, uuid, content, timestamp, …}`, the same shape as the `.jsonl` line it came
+from — and that field is nowhere else: not in the DOM, not in `ccx:state`. `messagePropOf` reads it off
+`fiber.memoizedProps.message`, walking up to four `.return` hops the same way `sessionIdOfRow` walks up for
+`.session` — the div's own host fiber carries only its own DOM props, the component fiber one level up is
+the one that actually received `message` in JSX.
+
+That is the same `memoizedProps` read the section above calls untrustworthy for scalar props, and it is used
+here anyway, deliberately: the risk it describes is a fiber slot being *reused for a different logical row*
+— list virtualization or reordering handing the same DOM node to a different session between commits, which
+is a real hazard in a picker that groups and re-sorts. The transcript has neither: messages are appended,
+never reordered or virtualized away, so a bubble's fiber stays bound to the same message for its entire
+life. And the one field read here, `timestamp`, is written once when the message is created and never
+mutated afterward — unlike `content`, which keeps changing while a turn streams — so even catching a stale
+alternate mid-render returns the same value a fresh read would. `sessionIdOfRow` additionally cross-checks
+`fiber.key` because a wrong session id there means a wrong *provider* icon; a timestamp one paint behind,
+self-correcting on the next debounced pass 60 ms later, does not carry that cost.
+
+Written as `data-ccx-time` / `data-ccx-date` plus a `::after` / `::before` pseudo-element, not an injected
+child — the same reasoning as the provider mark: an assistant bubble keeps re-rendering while its turn is
+still streaming, and a real child node risks being wiped on the next commit where a data attribute on the
+node React already owns does not.
+
+The time went through two flex-based attempts before landing on `position:absolute` instead, and both
+detours are worth recording — the same shape of mistake is easy to repeat the next time something needs
+pinning to a corner of a flex item.
+
+`.message_07S1Yg{display:flex;flex-direction:column;align-items:flex-start;position:relative;…}` is the
+actual box, verified from `webview/index.css`, not assumed from the session-list icon's row-flex
+precedent. First attempt: `flex-basis` on the `::after`, meant to force full width — wrong axis, since a
+column flex's main axis is vertical, so `flex-basis` claims *height*. Second attempt: `align-self:
+stretch`, the axis-correct way to span a column flex's cross axis — right in theory, and it still did not
+visibly fix the reported bug, because the actual complaint was never about width in the first place: it
+was several unrelated bubbles' trailing labels reading as one confusing cluster, which no amount of
+correcting one bubble's own alignment was going to touch.
+
+`position:absolute` sidesteps the question entirely: `.message_` already has `position:relative` (no
+setup needed), and an absolutely positioned element ignores `flex-direction` and `align-items` completely
+— `right:8px;bottom:2px` pins it to the bubble's own corner regardless of what layout mode the container
+is in, or ever changes to. `pointer-events:none` keeps it from stealing clicks meant for text it may sit
+over; `white-space:nowrap` is unchanged from the flex attempts and still does the same job — a narrow
+sidebar otherwise wraps `"4:31 PM"` between the number and the meridiem, reading as two lines instead of
+one label.
+
+That corner placement is also what makes showing a time on *every* bubble viable. A first pass tried
+collapsing a run of same-speaker bubbles — a thinking summary, one per tool call, the text answer — down
+to a single trailing time, reasoning that a full-width line repeated three or four times in a row reads as
+noise. Feedback was the opposite: readers wanted the time on every message, not fewer of them. With the
+label corner-anchored rather than taking its own line, that preference costs nothing to grant — nothing
+was collapsing lines any more, so there was nothing left for the grouping to save.
+
+The date `::before` has a problem the time `::after` never did: `.timelineMessage_07S1Yg:before` — the
+assistant bubble's own class — already owns that pseudo-element slot, drawing the small
+success/failure/progress status dot. Same specificity as `[data-ccx-date]::before` (one class vs one
+attribute selector), so which one wins is otherwise decided by stylesheet order — not something worth
+depending on. `!important` makes it deterministic: the date pill always wins the one message a day where
+they would collide, and that message's status dot goes undrawn. A once-a-day cosmetic gap, chosen over a
+pill that might silently never show on assistant messages depending on injection order. It stays a
+block-level pill centered with `margin:auto`, not corner-anchored — a day boundary is a fact about the
+gap between two messages, not a property of one bubble's corner.
+
+"Today" / "Yesterday" come from `Intl.RelativeTimeFormat`, not a hand-written table: every language the CLI
+already speaks through `/config` is one `Intl` already speaks too, so this needed no entry in `LANGUAGES` —
+it reads the runtime's own locale rather than the CLI's configured one, which is the more chat-app-like
+choice here (Telegram does the same) and, unlike the attachment prompt, does not need to agree with what
+language the *model* answers in.
 
 ### CSP and loading your own script
 
