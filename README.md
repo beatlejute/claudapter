@@ -32,6 +32,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
 - **Message timestamps** — every turn in the transcript gets a small local time, chat-app style, and a date separator ("Today", "Yesterday", or the date) wherever the day changes. Read straight off each message's own `.jsonl` timestamp, so it reflects when the turn actually happened, not when it rendered.
 - **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
+- **Local spellcheck with correction suggestions** — Russian words are checked locally with Hunspell. Misspellings receive a red wavy underline; right-click one to choose a correction. Only bounded, de-duplicated words leave the webview, and no draft text is sent over the network.
 - **Send an image with no text** — attaching a file to an empty composer writes a short prompt into it (`Analyse the image in the context of this conversation`, agreeing with what is actually attached), which is what makes the send button light up. It is a normal draft: edit it, replace it, or just press Enter. The wording follows `language` from `/config`; to reword a language, edit its row in `LANGUAGES` in [src/host.js](src/host.js).
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
 
@@ -267,6 +268,30 @@ Because the suppression takes the stock **Copy** with it, the replacement menu c
 This is the project's only dependency on VS Code rather than on the extension, so it is on the
 re-verification list: `resources/app/out/vs/workbench/contrib/webview/browser/pre/index.html`. If that
 early-return ever goes away the failure is two menus at once, not a loud error.
+
+### Local spellcheck and correction menu
+
+The composer has a local Russian spellchecker backed by Hunspell. VS Code starts its Electron webviews with native Chromium spellchecking disabled, so Claudapter checks the words without changing the React-owned composer DOM:
+
+1. the webview extracts only unique Russian words from the current draft;
+2. the extension host checks them with the local `hunspell -a` process and the configured dictionary;
+3. misspellings are drawn with the CSS Custom Highlight API;
+4. right-clicking an underlined word opens up to five Hunspell suggestions;
+5. choosing a suggestion replaces only that word through the composer's normal `input` path.
+
+The feature is disabled unless `spellcheck.enabled` is explicitly `true` in `~/.claude/settings.json`:
+
+```json
+{
+    "spellcheck": {
+        "enabled": true,
+        "checker": "hunspell",
+        "language": "ru_RU"
+    }
+}
+```
+
+Install Hunspell and the `ru_RU` dictionary separately. On Windows, the runtime looks first for `hunspell.exe` in `%LOCALAPPDATA%\\Microsoft\\WinGet\\Links` and otherwise falls back to `PATH`. Checking is local-only: the full draft is never sent to a network service or written to the debug log. If Hunspell is unavailable or times out, spellcheck fails closed and normal composer input remains unchanged.
 
 ### Taking back the last message
 
