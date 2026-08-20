@@ -312,7 +312,9 @@ The gesture is **Ctrl+Shift+Z**, and *Retract last message* in the right-click m
 4. the answer you see next is the agent's response to your corrected message.
 
 The hidden uuids are persisted per session in `~/.claude/claudapter/hidden-messages.json`, so a resume
-re-hides them, and content search skips them. Retracting is refused while a turn is still running.
+re-hides them, and content search skips them. Retracting while a turn is still running interrupts it
+first (the same stop the button and Escape trigger), waits for the partial response to settle, then
+retracts — so a message can be taken back the moment the answer starts going wrong.
 
 Two costs worth knowing. Ctrl+Shift+Z is **redo** inside the composer, and that is what it gives up;
 Ctrl+Z is untouched. And recalling the text alone needs none of this — **↑** in an empty composer

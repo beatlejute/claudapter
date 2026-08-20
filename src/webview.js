@@ -1095,16 +1095,27 @@
             var m = msgs[i];
             // A retracted turn is already accounted for — the previous message is the one the user
             // gets to take back next.
-            if (m && m.type === 'user' && !m.isSynthetic && !(m.uuid && hiddenUuids.has(m.uuid)))
+            if (m && m.type === 'user' && !m.isSynthetic && !isInterruptTurn(m) && !(m.uuid && hiddenUuids.has(m.uuid)))
                 return { index: i, uuid: m.uuid, text: messageText(m) };
         }
         return null;
     }
 
+    // An interruption is not a user message: when the user stops a turn (or the retract interrupts it),
+    // the CLI records it as an ordinary type:"user" turn whose text is one of these markers — with no
+    // isSynthetic flag at all, so the isSynthetic check above does not catch it. "Taking back the last
+    // message" must reach past the interruption to the message the user actually sent.
+    function isInterruptTurn(m) {
+        if (!m || m.type !== 'user') return false;
+        var t = messageText(m);
+        return t === '[Request interrupted by user]' || t === '[Request interrupted by user for tool use]';
+    }
+
+    // A busy session is retractable too — retractLastMessage interrupts the running turn first — so
+    // the only thing that makes the gesture inert is a session with nothing to take back.
     function canRetract() {
         var s = activeSession();
         if (!s) return false;
-        if (s.busy && s.busy.value) return false;
         return lastUserMessage() !== null;
     }
 
@@ -1163,10 +1174,9 @@
         return true;
     }
 
-    function retractLastMessage() {
-        var s = activeSession();
-        if (!s) return toast('No active session.');
-        if (s.busy && s.busy.value) return toast('Wait for the current response before retracting.');
+    // The retract proper, run once the session is idle. Busy turns take a different route (they are
+    // interrupted first), so this entry point assumes nothing about the agent's state.
+    function doRetract(s) {
         var last = lastUserMessage();
         if (!last) return toast('Nothing to retract.');
 
@@ -1223,6 +1233,34 @@
                 }
             }, 30000);
         }
+    }
+
+    function retractLastMessage() {
+        var s = activeSession();
+        if (!s) return toast('No active session.');
+        if (!(s.busy && s.busy.value)) { doRetract(s); return; }
+
+        // A turn is streaming. Retracting mid-stream is unsafe, but not because anything would break
+        // here — the failure is downstream: the instruction would be appended while the old response
+        // is still finalising, so the "first assistant message after the instruction" scan would find
+        // that old response instead of the instruction's own answer, and the instruction's answer
+        // could not be hidden. So the running turn is interrupted first (the same session.interrupt
+        // the stop button and Escape use), then the retract waits for the partial response to settle
+        // into messages.value before proceeding. busy clears when the CLI's result arrives, so polling
+        // it is the ground truth; the timer bounds the wait in case the CLI never answers.
+        if (typeof s.interrupt !== 'function') { toast('Wait for the current response before retracting.'); return; }
+        try { s.interrupt(); } catch (err) { toast('Wait for the current response before retracting.'); return; }
+        toast('Stopping the current response…');
+        var waited = 0;
+        (function poll() {
+            if (s.busy && s.busy.value === false) { doRetract(s); return; }
+            waited += 150;
+            if (waited >= 10000) {
+                toast('Could not stop the current response in time — retract again once it finishes.');
+                return;
+            }
+            window.setTimeout(poll, 150);
+        })();
     }
 
     // Three jobs, called from the DOM observer and from ccx:state. First it accounts for the retract's
