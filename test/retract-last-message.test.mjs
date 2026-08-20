@@ -107,10 +107,14 @@ const messages = [
     { type: 'user', uuid: 'u1', content: [{ content: { type: 'text', text: 'wrong command' } }] },
     { type: 'assistant', uuid: 'a1', content: [{ content: { type: 'text', text: 'done' } }] },
 ];
+let interrupts = 0;
 const session = {
     messages: { value: messages },
     busy: { value: false },
     lastServedModel: { value: 'x' },
+    // The stop button and Escape call session.interrupt(); the retract does too when a turn is
+    // streaming, then waits for busy to drop (the CLI's result is what clears it) before proceeding.
+    interrupt: () => { interrupts++; return Promise.resolve(); },
     // The real send() appends the user turn to messages.value before the CLI answers — mirror that.
     send: (text) => {
         sends.push(text);
@@ -130,8 +134,17 @@ fromHost({ type: 'ccx:state', sessionId: 'sess-1', hiddenMessages: [] });
 
 function toasts() { return body.children.filter((c) => c.className === 'ccx-toast'); }
 function hidePosts() { return posted.filter((m) => m.type === 'ccx:hideMessages'); }
+// Fire the page's pending timers once, in order. The busy-retract polls busy via a 150 ms timer, so
+// advancing time is how a test says "the interrupted turn has settled".
+function runTimers() {
+    const due = timers.slice();
+    timers.length = 0;
+    due.forEach((t) => { if (!t.cleared) t.fn(); });
+}
 function reset() {
     sends.length = 0;
+    interrupts = 0;
+    timers.length = 0;
     posted.length = 0;
     body.children.length = 0;
     composer.textContent = '';
@@ -171,13 +184,29 @@ const ans = hidePosts();
 assert.equal(ans.length, 3, 'the instruction answer must be hidden as well');
 assert.deepEqual(ans[2].uuids, ['a2'], 'the third hide must be the instruction answer');
 
-// 3. A busy session refuses with a toast and sends nothing.
+// 3. A streaming session is interrupted first; the retract waits for the partial response to settle
+//    into messages.value, then proceeds — the instruction must NOT be sent while busy is still true,
+//    or the "first assistant message after the instruction" scan would grab the old response.
 reset();
+// A fresh session id forces the page's hidden/pending state to reset — the earlier scenarios already
+// hid u1/a1 under sess-1, and retract skips uuids it has already hidden.
+fromHost({ type: 'ccx:state', sessionId: 'sess-busy', hiddenMessages: [] });
 session.busy.value = true;
 ccx.retract();
-assert.equal(sends.length, 0, 'must not send while a turn is running');
-assert.equal(hidePosts().length, 0, 'must not hide while a turn is running');
-assert.ok(toasts().length, 'a busy session must explain itself');
+assert.equal(interrupts, 1, 'a running turn must be interrupted before retracting');
+assert.equal(sends.length, 0, 'must not send the instruction while the turn is still settling');
+assert.equal(hidePosts().length, 0, 'must not hide while the turn is still settling');
+// The interrupted turn finalises: the CLI records the stop as a user turn whose text is the
+// interruption marker (no isSynthetic flag), then busy drops. That marker must NOT be taken as the
+// message to take back.
+session.messages.value.push({ type: 'user', uuid: 'u-interrupt', content: [{ content: { type: 'text', text: '[Request interrupted by user]' } }] });
+session.busy.value = false;
+runTimers();
+assert.equal(sends.length, 1, 'once the turn settles, the retract must send the instruction');
+assert.ok(hidePosts().length, 'once the turn settles, the retract must hide the failed exchange');
+assert.ok(/«wrong command»/.test(sends[0]), 'the instruction must quote the real message, not the interruption marker');
+assert.equal(composer.textContent, 'wrong command', 'the composer must be filled after the interrupt');
+assert.equal(composerInputs.length, 1, 'the fill after interrupt must sync the draft signal');
 
 // 4. A transcript with no user message has nothing to retract.
 reset();
