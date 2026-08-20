@@ -33,6 +33,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Message timestamps** — every turn in the transcript gets a small local time, chat-app style, and a date separator ("Today", "Yesterday", or the date) wherever the day changes. Read straight off each message's own `.jsonl` timestamp, so it reflects when the turn actually happened, not when it rendered.
 - **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
 - **Local spellcheck with correction suggestions** — Russian words are checked locally with Hunspell. Misspellings receive a red wavy underline; right-click one to choose a correction. Only bounded, de-duplicated words leave the webview, and no draft text is sent over the network.
+- **Model and effort chip** — a small read-only chip in the composer's toolbar row, left of the mode picker: the model and reasoning effort this session is actually running (`Opus · xhigh`, or `· ultracode` when ultracode is selected). It reads the session's live signals, not `settings.json` — that file only holds the global defaults and would name the wrong chat.
 - **Send an image with no text** — attaching a file to an empty composer writes a short prompt into it (`Analyse the image in the context of this conversation`, agreeing with what is actually attached), which is what makes the send button light up. It is a normal draft: edit it, replace it, or just press Enter. The wording follows `language` from `/config`; to reword a language, edit its row in `LANGUAGES` in [src/host.js](src/host.js).
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
 
@@ -232,20 +233,30 @@ change repaints them without a reload — `settings.json` is already watched. To
 edit its row in `LANGUAGES` in `src/host.js`; the copy in `src/webview.js` is only the fallback for a
 host too old to send the field.
 
-### Resuming after an error or interrupt
+### Resuming after an error, limit, or interrupt
 
-When the model stops mid-run — an error banner or the user pressing Stop — the conversation halts and
-the only way forward is to type "continue" by hand. Claudapter injects that prompt automatically when
-the composer is empty and one of those halt states is visible:
+When the model stops mid-run — an error banner, a hard usage limit, a request-level failure, or the
+user pressing Stop — the conversation halts and the only way forward is to type "continue" by hand.
+Claudapter injects that prompt automatically when the composer is empty and one of those halt states
+is visible:
 
 ```js
-[class*="banner_"][data-color="error"]        // error banner (a 429 rate limit lands here too)
-[class*="interruptedMessage_"]                // user interrupt
+[class*="banner_"][data-color="error"]                        // error banner (a 429 rate limit lands here too)
+[class*="interruptedMessage_"]                                // user interrupt
+[class*="banner_"][data-color="warning"] matching "You've hit your"  // subscription limit hit
+newest assistant turn whose text begins "API Error:"          // request-level failure (no banner)
 ```
 
-Deliberately absent: the `data-color="warning"` banner. That one is "you are *approaching* a limit"
-while the run is healthy, so filling the composer there would inject into a live conversation rather
-than resume a halted one.
+The `data-color="warning"` banner carries two different notices, so wording is the discriminator:
+"*You've hit your* session/weekly limit · resets …" is a hard block and gets the prompt, while
+"*Approaching* …" and "*You've used N% of* …" mean the run is still healthy and are left alone. The
+notice is hardcoded English in the bundle, so the text match holds in every `/config` language.
+
+A request-level failure — `API Error: Request rejected (429) · upstream 429: {…usage_limit_reached…}` —
+arrives as an ordinary assistant turn whose text is the error, not as a banner, so the banner selector
+never sees it. Claudapter reads the newest turn from the transcript and matches its leading
+`API Error:`, a prefix the CLI itself hardcodes in English. Once a later message follows, the failure
+is a past event rather than a state to resume, so the prompt is not injected.
 
 The prompt follows `language` from `/config` (20 languages, same as the attachment prompt). It
 resets when the terminal state clears, so the next error gets a fresh prompt.
@@ -292,6 +303,20 @@ The feature is disabled unless `spellcheck.enabled` is explicitly `true` in `~/.
 ```
 
 Install Hunspell and the `ru_RU` dictionary separately. On Windows, the runtime looks first for `hunspell.exe` in `%LOCALAPPDATA%\\Microsoft\\WinGet\\Links` and otherwise falls back to `PATH`. Checking is local-only: the full draft is never sent to a network service or written to the debug log. If Hunspell is unavailable or times out, spellcheck fails closed and normal composer input remains unchanged.
+
+### Model and effort chip
+
+The composer's toolbar row ends with the submit button, and the mode picker ("Auto") is the node right
+before it, so the chip is inserted before that sibling — in the same flex row, left of "Auto", where it
+cannot overlap the history or new-chat buttons. React owns the row, so the existing MutationObserver
+re-inserts the chip after any commit that drops it.
+
+The values are the session object's live signals: `modelSelection`, falling back to `lastServedModel`
+and `currentMainLoopModel` for the model; `effortLevel` and `ultracodeEnabled` for the effort side.
+`settings.json` is deliberately not consulted — its `model` is a global default, and showing it is
+exactly the "not this chat" complaint. The `[1m]` context suffix is stripped before the family alias
+lookup, so `opus[1m]` renders as `Opus`, and an ultracode selection replaces the effort level in the
+label.
 
 ### Taking back the last message
 

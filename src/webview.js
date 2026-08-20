@@ -16,7 +16,7 @@
         window.acquireVsCodeApi = function () { return proxy; };
     }
 
-    var state = { profiles: [], active: null, sessionId: null, bindings: {} };
+    var state = { profiles: [], active: null, sessionId: null, bindings: {}, selectedModel: null, effortLevel: null };
     var icons = {};
     var fallback = null;
     var registry = null;
@@ -205,6 +205,8 @@
                 active: d.active || null,
                 models: d.models || null,
                 bindings: d.bindings || {},
+                selectedModel: d.selectedModel || null,
+                effortLevel: d.effortLevel || null,
                 sessionId: d.sessionId || state.sessionId,
             };
             adoptAttachmentPrompts(d.attachmentPrompts);
@@ -223,6 +225,7 @@
             syncAction();
             syncChip();
             decorateModelPicker();
+            decorateModelAndEffort();
             decorateSessionList();
             decorateTranscript();
             applyHidden();
@@ -285,6 +288,181 @@
             host.appendChild(tag);
             host.dataset.ccxModel = item.model;
         });
+    }
+
+    // The indicator is an inert DOM sibling in the composer's toolbar row, restored after React commits
+    // by the existing observer. Changing model and effort stays the job of the stock controls and slash
+    // commands.
+    function selectedModelLabel(model) {
+        if (typeof model !== 'string' || !model.trim()) return 'Auto';
+        // the session signals carry the raw selection, context suffix and all ("opus[1m]") — the chip
+        // shows the family name, so the [1m]-style marker is stripped before the alias lookup
+        var value = model.trim().replace(/\[[^\]]*\]$/, '').trim();
+        var aliases = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable' };
+        return aliases[value.toLowerCase()] || value;
+    }
+
+    function liveUltracode() {
+        return sessionField('ultracodeEnabled') === true;
+    }
+
+    // The values the composer actually shows are the session's live signals, not settings.json — that
+    // file only holds the defaults, so it names whatever chat last changed /model or /effort, which is
+    // exactly the "not this chat" complaint. A fresh session reports undefined until the user picks, and
+    // the picker renders that as "Auto".
+    function sessionField(name) {
+        var s = sessionObj;
+        try {
+            var v = s && s[name];
+            return v && typeof v === 'object' && 'value' in v ? v.value : undefined;
+        } catch (e) {
+            return undefined;
+        }
+    }
+
+    // The model THIS chat is actually on: the explicit pick first, then what actually ran. settings.json
+    // is deliberately not consulted — its `model` is a global default, not this session's value, and
+    // surfacing it is exactly the "not this chat" complaint.
+    function liveModel() {
+        var sources = ['modelSelection', 'lastServedModel', 'currentMainLoopModel'];
+        for (var i = 0; i < sources.length; i++) {
+            var m = sessionField(sources[i]);
+            if (typeof m === 'string' && m.trim() && m.trim() !== 'default' && m.trim() !== 'auto')
+                return m.trim();
+        }
+        return null;
+    }
+
+    function liveEffort() {
+        var e = sessionField('effortLevel');
+        return typeof e === 'string' && e.trim() ? e.trim() : null;
+    }
+
+    // The label belongs in the composer's toolbar row, left of the mode picker ("Auto"), not on a line
+    // of its own — a bare child of the fieldset gets stretched into a full-width bar by its column flex.
+    // The row always ends with the submit button, and the mode picker is the node right before it, so
+    // inserting before that sibling lands the label beside "Auto" in the same flex row. When the row is
+    // missing the fieldset itself is the fallback anchor.
+    function findIndicatorAnchor() {
+        var composers = document.querySelectorAll('fieldset[data-permission-mode]');
+        for (var i = 0; i < composers.length; i++) {
+            var composer = composers[i];
+            if (composer.offsetParent === null) continue;
+            var send = composer.querySelector('button[type="submit"]');
+            if (send && send.parentElement)
+                return { parent: send.parentElement, before: send.previousElementSibling || send };
+            return { parent: composer, before: null };
+        }
+        return null;
+    }
+
+    function describeEl(el) {
+        if (!el) return null;
+        return {
+            tag: el.tagName,
+            cls: typeof el.className === 'string' ? el.className.slice(0, 120) : '',
+            text: (el.textContent || '').trim().slice(0, 60),
+            perm: el.getAttribute ? el.getAttribute('data-permission-mode') : null,
+            spark: el.getAttribute ? el.getAttribute('data-spark') : null,
+        };
+    }
+
+    // Throttled, capped diagnostic: the settled DOM is what matters, not the first paint, so this
+    // re-fires (debounced) a handful of times and the last one is the truth.
+    function debugDump(reason) {
+        if (!sessionObj) return;
+        window.__ccxDumpN = (window.__ccxDumpN || 0) + 1;
+        if (window.__ccxDumpN > 25) return;
+        var fieldsets = [];
+        document.querySelectorAll('fieldset[data-permission-mode]').forEach(function (f) {
+            fieldsets.push({
+                visible: f.offsetParent !== null,
+                cls: typeof f.className === 'string' ? f.className.slice(0, 120) : '',
+                perm: f.getAttribute('data-permission-mode'),
+                spark: f.getAttribute('data-spark'),
+                legends: Array.prototype.map.call(f.querySelectorAll('legend'), describeEl),
+            });
+        });
+        var permEls = [];
+        document.querySelectorAll('[data-permission-mode]').forEach(function (el) {
+            permEls.push(describeEl(el));
+        });
+        var labels = [];
+        var wanted = ['Auto', 'Default', 'Opus', 'Sonnet', 'Haiku', 'Fable', 'xhigh', 'max'];
+        document.querySelectorAll('body *').forEach(function (el) {
+            if (labels.length >= 40 || el.offsetParent === null) return;
+            if (el.children && el.children.length > 0) return;
+            var t = (el.textContent || '').trim();
+            if (!t) return;
+            var hit = false;
+            for (var i = 0; i < wanted.length; i++) {
+                if (t === wanted[i] || t.indexOf('Effort:') === 0) { hit = true; break; }
+            }
+            if (!hit) return;
+            var r = el.getBoundingClientRect();
+            labels.push({
+                tag: el.tagName,
+                cls: typeof el.className === 'string' ? el.className.slice(0, 100) : '',
+                text: t.slice(0, 40),
+                x: Math.round(r.x),
+                y: Math.round(r.y),
+            });
+        });
+        var cfg = null;
+        try {
+            var c = sessionObj.config && sessionObj.config.value;
+            if (c) cfg = { modelSetting: c.modelSetting, modelCount: c.models ? c.models.length : 0 };
+        } catch (e) {}
+        send({
+            type: 'ccx:debug',
+            n: window.__ccxDumpN,
+            reason: reason,
+            dump: {
+                modelSelection: sessionField('modelSelection'),
+                lastServedModel: sessionField('lastServedModel'),
+                currentMainLoopModel: sessionField('currentMainLoopModel'),
+                effortLevel: liveEffort(),
+                ultracodeEnabled: liveUltracode(),
+                permissionMode: sessionField('permissionMode'),
+                fastModeState: sessionField('fastModeState'),
+                settingsModel: state.selectedModel,
+                settingsEffort: state.effortLevel,
+                profile: state.active,
+                config: cfg,
+                fieldsets: fieldsets,
+                permEls: permEls,
+                labels: labels,
+            },
+        });
+    }
+
+    var debugDumpTimer = null;
+    function scheduleDebugDump(reason) {
+        clearTimeout(debugDumpTimer);
+        debugDumpTimer = setTimeout(function () { debugDump(reason); }, 700);
+    }
+
+    function decorateModelAndEffort() {
+        scheduleDebugDump('decorate');
+        var model = liveModel();
+        var label =
+            selectedModelLabel(model) + ' · ' + (liveUltracode() ? 'ultracode' : liveEffort() || 'Auto');
+        var anchor = findIndicatorAnchor();
+        var indicators = document.querySelectorAll('.ccx-model-effort');
+        for (var i = 0; i < indicators.length; i++) {
+            if (!anchor || indicators[i].parentElement !== anchor.parent) indicators[i].remove();
+        }
+        if (!anchor) return;
+
+        var indicator = anchor.parent.querySelector(':scope > .ccx-model-effort');
+        if (!indicator) {
+            indicator = document.createElement('span');
+            indicator.className = 'ccx-model-effort';
+            indicator.title = 'Selected model and reasoning effort';
+            if (anchor.before) anchor.parent.insertBefore(indicator, anchor.before);
+            else anchor.parent.appendChild(indicator);
+        }
+        indicator.textContent = label;
     }
 
     // The session id is nowhere in the DOM: the history row is a bare <button> whose entire prop object
@@ -568,6 +746,7 @@
             clearTimeout(timer);
             timer = setTimeout(function () {
                 decorateModelPicker();
+                decorateModelAndEffort();
                 decorateSessionList();
                 decorateTranscript();
                 applyHidden();
@@ -907,13 +1086,15 @@
 
     // --- Resume after terminal state --------------------------------------------------------------
     //
-    // When the model hits an error or the user interrupts, the conversation stops and the only way
-    // forward is to type "continue" by hand. This injects that prompt automatically when the composer
-    // is empty and one of those halt states is visible in the transcript.
+    // When the model hits an error, a hard usage limit, or the user interrupts, the conversation stops
+    // and the only way forward is to type "continue" by hand. This injects that prompt automatically
+    // when the composer is empty and one of those halt states is visible.
     //
-    // Two states, distinguished by their markup:
+    // Four states, distinguished by their markup:
     //   - Error banner:      [class*="banner_"][data-color="error"]
     //   - Interrupt message: [class*="interruptedMessage_"]
+    //   - Usage limit hit:   a [data-color="warning"] banner whose text begins "You've hit your"
+    //   - Request failure:   the newest assistant turn whose text begins "API Error:"
     //
     // The prompt is injected once per terminal state. It resets when the state clears (the user sends
     // a message and the banner disappears), so the next terminal gets a fresh prompt.
@@ -942,16 +1123,47 @@
         return last.contains(halt) || !(halt.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING);
     }
 
-    // Check for the two halt states worth resuming: a real error (the 429 that hits a limit is an
-    // error, so it lands here too) and a trailing user interrupt. Deliberately NOT the warning
-    // banner — that one shows "you are approaching a limit" while the run is perfectly healthy, so
-    // filling the composer there would read as the prompt interrupting a live conversation rather
-    // than resuming a halted one.
+    // Check for the halt states worth resuming: a real error (a 429 rate limit is an error, so it
+    // lands here too), a trailing user interrupt, a hard usage limit, and a request-level failure.
+    // The usage limit shares the warning-banner colour with the soft "approaching a limit" notice, so
+    // it is told apart by wording (see hitLimitNotice), not by colour — "Approaching …" and "You've
+    // used N% of …" mean the run is still healthy and must not fill the composer.
     function detectTerminalState() {
         var errorBanner = document.querySelector('[class*="banner_"][data-color="error"]');
         if (errorBanner && errorBanner.offsetParent !== null) return 'error';
         if (interruptIsCurrent()) return 'interrupt';
+        if (hitLimitNotice()) return 'limit';
+        if (failedTurnIsCurrent()) return 'failed';
         return null;
+    }
+
+    // "You've hit your <limit> · resets …" is a hard block — the request was rejected and nothing can
+    // be sent until the reset time. It renders as a warning banner, the same colour as the soft
+    // "approaching a limit" notice, so wording is the only honest discriminator. The string is
+    // hardcoded English in the bundle (not localised), which keeps the text match stable across
+    // /config languages.
+    function hitLimitNotice() {
+        var banners = document.querySelectorAll('[class*="banner_"][data-color="warning"]');
+        for (var i = 0; i < banners.length; i++) {
+            var banner = banners[i];
+            if (banner.offsetParent === null) continue;
+            if (/You've hit your\b/i.test(banner.textContent || '')) return true;
+        }
+        return false;
+    }
+
+    // A request-level failure ("API Error: Request rejected (429) …") lands in the transcript as an
+    // ordinary assistant turn whose text is the error, not as a banner — the error-banner selector
+    // above never sees it. The prefix is the CLI's own hardcoded English, so the match is stable.
+    // Only the newest turn counts: once a later message follows, the failure is a past event, not a
+    // state to resume.
+    function failedTurnIsCurrent() {
+        var s = activeSession();
+        var msgs = s && s.messages && s.messages.value;
+        if (!Array.isArray(msgs) || !msgs.length) return false;
+        var last = msgs[msgs.length - 1];
+        if (!last || last.type !== 'assistant') return false;
+        return /^API Error:/.test(messageText(last));
     }
 
     // The send button swaps its icon between send and stop: stopIcon_ only renders while the model is
@@ -1670,6 +1882,7 @@
         '.ccx-model{margin-left:auto;opacity:.6;font-size:11px}',
         '.ccx-prov-tag{opacity:.7;font-size:11px;padding:1px 6px;border-radius:8px;background:var(--vscode-badge-background)}',
         '.ccx-model-tag{margin-left:6px;opacity:.55;font-size:10px;font-family:var(--vscode-editor-font-family, monospace)}',
+        '.ccx-model-effort{display:inline-flex;align-items:center;flex:0 0 auto;padding:0 8px;border-radius:8px;background:var(--vscode-badge-background, transparent);color:var(--vscode-descriptionForeground, var(--vscode-foreground));font:11px var(--vscode-font-family);line-height:18px;opacity:.9;pointer-events:none;user-select:none;white-space:nowrap}',
         // The row is display:flex;align-items:center;gap:8px, so ::before simply becomes its leading flex
         // item and the flex:1 title still ellipsizes. No child node, so nothing for React to reconcile.
         'button[data-ccx-provider]::before{content:"";flex:0 0 auto;width:13px;height:13px;margin-right:-3px;border-radius:3px;background-image:var(--ccx-icon);background-size:contain;background-position:center;background-repeat:no-repeat;opacity:.9}',
@@ -1717,6 +1930,7 @@
     watchSelection();
     if (document.body) {
         syncChip();
+        decorateModelAndEffort();
         decorateSessionList();
         decorateTranscript();
         watchComposerSpellcheck();
@@ -1724,6 +1938,7 @@
     } else {
         document.addEventListener('DOMContentLoaded', function () {
             syncChip();
+            decorateModelAndEffort();
             decorateSessionList();
             decorateTranscript();
             watchComposerSpellcheck();
