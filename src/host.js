@@ -735,9 +735,17 @@ function attachmentPrompts() {
     return out;
 }
 
+function selectedModelAndEffort() {
+    const settings = readJson(SETTINGS_FILE);
+    const model = typeof settings?.model === 'string' ? settings.model.replace(/\[1m\]$/, '').trim() : '';
+    const effort = typeof settings?.effortLevel === 'string' ? settings.effortLevel.trim() : '';
+    return { model: model || null, effort: effort || null };
+}
+
 function stateFor(sessionId, webview) {
     const profiles = listProfiles();
     const active = effectiveProfile(sessionId, webview);
+    const selection = selectedModelAndEffort();
     return {
         // A weak id stays on the host. The page adopts whatever arrives here as state.sessionId and
         // hands it straight back on ccx:apply as the id to resume — so a weak one would leave here as
@@ -745,6 +753,8 @@ function stateFor(sessionId, webview) {
         // models exactly as before; it is only not repeated to the page.
         sessionId: (webview && webview.__ccxSessionWeak ? null : sessionId) || null,
         active,
+        selectedModel: selection.model,
+        effortLevel: selection.effort,
         // The history list resolves each row's provider from here
         bindings: loadBindings(),
         attachmentPrompts: attachmentPrompts(),
@@ -1143,6 +1153,8 @@ function attachWebview(webview) {
         } else if (m.type === 'ccx:timestamps') {
             const id = m.sessionId || sessionId;
             post(webview, { type: 'ccx:timestampsResult', sessionId: id, times: transcriptTimestamps(id) || {} });
+        } else if (m.type === 'ccx:debug') {
+            dlog('ccx:debug indicator', m);
         } else if (m.type === 'ccx:hideMessages') {
             const id = m.sessionId || sessionId;
             if (id) {
