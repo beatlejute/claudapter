@@ -163,6 +163,22 @@ function resolveUpstreamModel(model, rules) {
     return (family && rules.families?.[family]) || model;
 }
 
+// A subagent's `model:` can carry a routing marker — `@<upstream>` or `@<upstream>:<model>` — to
+// send the request to a *different* proxied upstream than the one the session's base URL names.
+// The bare form defaults to the sonnet family, which the target's own rules then remap (or pass
+// through unchanged when no family rule matches). A literal id like "@codex" never reaches an
+// upstream: it is consumed here and replaced with the inner model before the call is built.
+const ROUTE_MARKER = /^@([A-Za-z0-9_.-]+)(?::(.*))?$/;
+const ROUTED_DEFAULT_MODEL = 'claude-sonnet-5';
+
+function routeByModel(model) {
+    if (typeof model !== 'string') return null;
+    const m = ROUTE_MARKER.exec(model.trim());
+    if (!m) return null;
+    const inner = m[2]?.trim();
+    return { name: m[1], model: inner || ROUTED_DEFAULT_MODEL };
+}
+
 function log(...parts) {
     const line = `${new Date().toISOString()} ${parts
         .map((p) => (typeof p === 'string' ? p : JSON.stringify(p)))
@@ -524,8 +540,27 @@ function createServer(config) {
                 return sendError(res, 400, 'invalid JSON body', 'invalid_request_error');
             }
         }
-        if (url.pathname.endsWith('/v1/messages') || url.pathname.endsWith('/messages'))
-            return handleMessages(req, res, body, upstream, name, rulesFor(name), reasoning);
+        if (url.pathname.endsWith('/v1/messages') || url.pathname.endsWith('/messages')) {
+            // A `@<upstream>[:<model>]` marker in the model re-routes the request to another
+            // proxied upstream. The default (path-derived) upstream and rules stay put otherwise.
+            let targetName = name;
+            let targetUpstream = upstream;
+            let targetBody = body;
+            try {
+                const parsed = JSON.parse(body);
+                const route = routeByModel(parsed.model);
+                if (route) {
+                    const routedUpstream = config.upstreams[route.name];
+                    if (!routedUpstream)
+                        return sendError(res, 404, `unknown upstream "${route.name}"`, 'invalid_request_error');
+                    targetName = route.name;
+                    targetUpstream = routedUpstream;
+                    parsed.model = route.model;
+                    targetBody = JSON.stringify(parsed);
+                }
+            } catch {}
+            return handleMessages(req, res, targetBody, targetUpstream, targetName, rulesFor(targetName), reasoning);
+        }
 
         return sendError(res, 404, `not found: ${url.pathname}`);
     });
@@ -544,4 +579,4 @@ if (isEntrypoint) {
     });
 }
 
-export { createServer, loadConfig, DEFAULTS, profileModelRules };
+export { createServer, loadConfig, DEFAULTS, profileModelRules, routeByModel };
