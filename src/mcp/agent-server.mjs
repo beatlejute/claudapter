@@ -259,6 +259,21 @@ async function preflight(env, requestedModel) {
     }
 }
 
+// What the run consumed. Deliberately not the CLI's own `total_cost_usd`: it prices every run
+// against Anthropic's table — the result even carries `provider: "firstParty"` for a DeepSeek call —
+// so on any other provider that number is off by roughly an order of magnitude in either direction.
+// Token counts come from the provider itself and are the same fact whoever served the request.
+function tokenSummary(usage) {
+    if (!usage) return null;
+    const input = Number(usage.input_tokens) || 0;
+    const output = Number(usage.output_tokens) || 0;
+    if (!input && !output) return null;
+    const cached = (Number(usage.cache_read_input_tokens) || 0) + (Number(usage.cache_creation_input_tokens) || 0);
+    return `tokens: ${input.toLocaleString('en-US')} in / ${output.toLocaleString('en-US')} out${
+        cached ? ` (+${cached.toLocaleString('en-US')} cached)` : ''
+    }`;
+}
+
 // The history list reads this file — a flat sessionId → profile map — to mark each session with its
 // provider. Recording the binding is what gives a delegated run the same provider icon as a tab.
 function recordBinding(sessionId, profile) {
@@ -417,13 +432,12 @@ async function runAgent(params) {
     recordBinding(payload.session_id, profile);
 
     const text = typeof payload.result === 'string' ? payload.result : JSON.stringify(payload.result ?? '');
-    const cost = typeof payload.total_cost_usd === 'number' ? `$${payload.total_cost_usd.toFixed(4)}` : 'n/a';
     const footer = [
         `profile: ${profile}`,
         `model: ${params.model || DEFAULT_MODEL}`,
         `mode: ${mode}`,
         `turns: ${payload.num_turns ?? '?'}`,
-        `cost: ${cost}`,
+        tokenSummary(payload.usage),
         payload.session_id ? `session: ${payload.session_id}` : null,
     ]
         .filter(Boolean)
@@ -584,4 +598,15 @@ function main() {
 const isEntrypoint = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isEntrypoint) main();
 
-export { TOOLS, callTool, handle, envForProfile, describeProfile, resolveClaudeBinary, preflight, providerMessage, MODES };
+export {
+    TOOLS,
+    callTool,
+    handle,
+    envForProfile,
+    describeProfile,
+    resolveClaudeBinary,
+    preflight,
+    providerMessage,
+    tokenSummary,
+    MODES,
+};
