@@ -40,9 +40,8 @@ writeProfile('codex', {
 process.env.CLAUDAPTER_PROFILES_DIR = profiles;
 process.env.CLAUDAPTER_RUNTIME_DIR = runtime;
 
-const { TOOLS, callTool, handle, envForProfile, describeProfile, preflight, providerMessage, MODES } = await import(
-    '../src/mcp/agent-server.mjs'
-);
+const { TOOLS, callTool, handle, envForProfile, describeProfile, preflight, providerMessage, tokenSummary, MODES } =
+    await import('../src/mcp/agent-server.mjs');
 
 // Collects everything the server writes to stdout while running `fn`
 async function capture(fn) {
@@ -232,6 +231,16 @@ async function main() {
     provider.close();
     assert.strictEqual(providerMessage('{"error":{"message":"deep"}}'), 'deep');
     assert.strictEqual(providerMessage('{"message":"flat"}'), 'flat');
+
+    // --- the run is summarised in tokens, not in the CLI's dollar figure: that one prices every
+    //     provider against Anthropic's table and is wrong by an order of magnitude off it
+    assert.strictEqual(tokenSummary({ input_tokens: 20790, output_tokens: 62 }), 'tokens: 20,790 in / 62 out');
+    assert.strictEqual(
+        tokenSummary({ input_tokens: 1200, output_tokens: 40, cache_read_input_tokens: 800, cache_creation_input_tokens: 200 }),
+        'tokens: 1,200 in / 40 out (+1,000 cached)',
+    );
+    assert.strictEqual(tokenSummary({ input_tokens: 0, output_tokens: 0 }), null, 'an empty count is left out entirely');
+    assert.strictEqual(tokenSummary(undefined), null, 'a result with no usage block is left out too');
 
     // --- the depth guard stops an agent chain from spawning itself forever
     process.env.CLAUDAPTER_AGENT_DEPTH = '2';
