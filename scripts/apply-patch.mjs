@@ -85,15 +85,16 @@ const PATCHES = [
     {
         // Right where the search query's own state is declared: adds a second state pair for the
         // ids the host reports back, and hands its setter to the page in the same expression, the same
-        // way injection point #4 hands over the registry and session. The useState alias itself is
-        // captured too (2.1.233: `ne`, 2.1.235: `ie`) rather than hardcoded — it is just a local like
-        // any other, and the minifier is free to call it something else on the next release.
+        // way injection point #4 hands over the registry and session. Both hook aliases are captured
+        // rather than hardcoded — useState (2.1.233: `ne`, 2.1.235–2.1.238: `ie`) and useRef (2.1.235:
+        // `ge`, 2.1.238: `_e`) are locals like any other, and the minifier renames them at will. The
+        // useRef one was hardcoded until 2.1.238 renamed it and this was the only signature to break.
         file: 'webview/index.js',
-        find: /,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=ge\(new Map\)/,
-        replace: (_found, query, setQuery, useState, renaming, setRenaming, refs) =>
+        find: /,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=([\w$]+)\(new Map\)/,
+        replace: (_found, query, setQuery, useState, renaming, setRenaming, refs, useRef) =>
             `,[${query},${setQuery}]=${useState}(""),[ccxContentMatches,ccxSetContentMatches]=${useState}(null),` +
             `ccxHandoff=(globalThis.__ccx&&globalThis.__ccx.onSearchState&&globalThis.__ccx.onSearchState(ccxSetContentMatches)),` +
-            `[${renaming},${setRenaming}]=${useState}(null),${refs}=ge(new Map)`,
+            `[${renaming},${setRenaming}]=${useState}(null),${refs}=${useRef}(new Map)`,
         where: 'replace',
     },
     {
