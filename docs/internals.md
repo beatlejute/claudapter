@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.235**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` (see "Content search reuses the session-list handoff" below) — but nothing else here changed, so the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.238**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). Everything else held: all eight signatures match 2.1.238 with that one capture generalised and nothing else touched, so the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -57,7 +57,8 @@ Every identifier there is a minified local, and the minifier reshuffles them rel
 | 2.1.227 | `f.env=b;` | `;` |
 | 2.1.228 | `f.env=v;` | `;` |
 | 2.1.229 | `f.env=v;` | `;` |
-| 2.1.231–2.1.233 | `f.env=v;` | `;` |
+| 2.1.231–2.1.235 | `f.env=v;` | `;` |
+| 2.1.238 | `h.env=y;` | `;` |
 
 2.1.227 is the one that changed the **shape**, not just the names. Up to 2.1.226 the three assignments were the condition of an `if`, with the node path as the last operand of the comma expression:
 
@@ -245,19 +246,26 @@ Point #6 is the state declaration, anchored on the exact sequence the query stat
 state and the per-row ref map already form:
 
 ```js
-,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=ge\(new Map\)
+,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=([\w$]+)\(new Map\)
 ```
 
 It inserts a second state pair — the ids the host reports back — right after the query state, and
 hands its setter to `globalThis.__ccx.onSearchState` in the same expression, the same trick point #4
 uses for the registry and session.
 
-The `useState` alias itself (`ne` in 2.1.233–2.1.234, `ie` in 2.1.235) is captured rather than
-hardcoded, the same reasoning as everywhere else in this file: it is one local among many, and the
-minifier renamed it the very next release. The first version of this signature hardcoded it, and
-2.1.235 broke on exactly that — `ge(new Map)` (the ref map, from `useRef`) held steady while `ne`
-became `ie`, which is the general shape of these breaks: never every local at once, always some
-subset, and never predictably which one.
+Both hook aliases are captured rather than hardcoded, the same reasoning as everywhere else in this
+file: they are locals among many, and the minifier renames them at will. This signature has been
+broken twice by exactly that, once per alias, and each time the fix was to stop naming it:
+
+| Release | `useState` | `useRef` | What broke |
+|---|---|---|---|
+| 2.1.233–2.1.234 | `ne` | `ge` | — |
+| 2.1.235 | `ie` | `ge` | `useState` was hardcoded as `ne` |
+| 2.1.238 | `ie` | `_e` | `useRef` was hardcoded as `ge` |
+
+That is the general shape of these breaks: never every local at once, always some subset, and never
+predictably which one — `useState` moved while `useRef` held, then the reverse. The failure is quiet
+either way (hit count 0, not an exception), so `apply-patch.mjs`'s count check is what surfaces it.
 
 Point #7 is the filter expression itself:
 
