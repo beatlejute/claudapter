@@ -35,7 +35,7 @@
         "mcp:remove": "node scripts/install-mcp.mjs --remove",
         "login:chatgpt": "node --use-env-proxy scripts/login-chatgpt.mjs",
         "auth:status": "node scripts/login-chatgpt.mjs --status",
-        "test": "node test/proxy.test.mjs && node test/responses.test.mjs && node test/model-overrides.test.mjs && node test/profile-icons.test.mjs && node test/env-isolation.test.mjs && node test/proxy-revival.test.mjs && node test/attachment-prompt.test.mjs && node test/fresh-tab-switch.test.mjs && node test/resume-guard.test.mjs && node test/compact-on-switch.test.mjs && node test/content-search.test.mjs && node test/message-timestamps.test.mjs && node test/retract-last-message.test.mjs && node test/spellcheck.test.mjs && node test/model-effort-indicator.test.mjs && node test/model-routing.test.mjs && node test/agent-server.test.mjs"
+        "test": "node test/proxy.test.mjs && node test/responses.test.mjs && node test/model-overrides.test.mjs && node test/profile-icons.test.mjs && node test/env-isolation.test.mjs && node test/proxy-revival.test.mjs && node test/attachment-prompt.test.mjs && node test/fresh-tab-switch.test.mjs && node test/resume-guard.test.mjs && node test/compact-on-switch.test.mjs && node test/content-search.test.mjs && node test/message-timestamps.test.mjs && node test/retract-last-message.test.mjs && node test/spellcheck.test.mjs && node test/model-effort-indicator.test.mjs && node test/model-routing.test.mjs && node test/agent-server.test.mjs && node test/pinned-sessions.test.mjs"
     },
     "engines": {
         "node": ">=18"

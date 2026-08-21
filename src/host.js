@@ -14,6 +14,7 @@ const SETTINGS_FILE = path.join(HOME, '.claude', 'settings.json');
 const ICONS_DIR = path.join(DIR, 'icons');
 const BINDINGS_FILE = path.join(DIR, 'bindings.json');
 const HIDDEN_FILE = path.join(DIR, 'hidden-messages.json');
+const PINNED_FILE = path.join(DIR, 'pinned.json');
 const ICON_EXTENSIONS = ['png', 'svg'];
 // An icon is inlined into the webview as base64 — past this size it is a mistake, not an icon
 const MAX_ICON_BYTES = 512 * 1024;
@@ -267,6 +268,34 @@ function addHidden(sessionId, uuids) {
     // the next read rebuilds without the hidden lines.
     S.transcriptTextCache && S.transcriptTextCache.delete(sessionId);
     S.transcriptTimeCache && S.transcriptTimeCache.delete(sessionId);
+}
+
+// --- Pinned sessions --------------------------------------------------------------------------
+//
+// Session ids the history list floats above the rest. A flat array rather than a map: the list is
+// short, it is read on every state push, and nothing about it is per-session except membership.
+// The order stored here is the order they were pinned in and is not the order they render in — the
+// list keeps its own recency order inside the pinned block, so pinning never reshuffles it.
+function loadPinned() {
+    const raw = readJson(PINNED_FILE);
+    return Array.isArray(raw) ? raw.filter((id) => typeof id === 'string' && id) : [];
+}
+
+function setPinned(sessionId, pinned) {
+    if (!sessionId || typeof sessionId !== 'string') return;
+    const list = loadPinned().filter((id) => id !== sessionId);
+    if (pinned) list.push(sessionId);
+    writeJson(PINNED_FILE, list);
+}
+
+// Nothing else ever revisits the list, and a deleted session's id can never come back — without
+// this it would hold its slot for as long as the file lives.
+function forgetPinned(sessionId) {
+    if (!sessionId || typeof sessionId !== 'string') return false;
+    const list = loadPinned();
+    if (!list.includes(sessionId)) return false;
+    writeJson(PINNED_FILE, list.filter((id) => id !== sessionId));
+    return true;
 }
 
 function profileFromSettings() {
@@ -759,6 +788,8 @@ function stateFor(sessionId, webview) {
         bindings: loadBindings(),
         attachmentPrompts: attachmentPrompts(),
         hiddenMessages: hiddenMessagesFor(sessionId),
+        // Not about this tab's session — the whole list, since the history list is what reads it
+        pinnedSessions: loadPinned(),
         models: active && active !== 'claude' ? modelsOf(active) : null,
         profiles: profiles.map((name) => {
             const env = profileEnv(name);
@@ -1095,6 +1126,11 @@ function attachWebview(webview) {
             const id = m.request.sessionId;
             if (id && typeof id === 'string') noteSessionId(webview, id, true);
         }
+        // A pin outlives the session it points at unless the deletion is noticed here — this is the
+        // only moment the id passes through, and the row is gone by the time anything else looks.
+        if (m.type === 'request' && m.request && m.request.type === 'delete_session') {
+            if (forgetPinned(m.request.sessionId)) broadcast();
+        }
         if (!m.type.startsWith('ccx:')) return;
 
         const sessionId = webview.__ccxSessionId || m.sessionId || null;
@@ -1155,6 +1191,14 @@ function attachWebview(webview) {
             post(webview, { type: 'ccx:timestampsResult', sessionId: id, times: transcriptTimestamps(id) || {} });
         } else if (m.type === 'ccx:debug') {
             dlog('ccx:debug indicator', m);
+        } else if (m.type === 'ccx:pinSession') {
+            // The row's own id, not the tab's: the pin is toggled from whichever history row was
+            // clicked, exactly like delete_session and rename_session above.
+            if (m.sessionId && typeof m.sessionId === 'string') {
+                setPinned(m.sessionId, Boolean(m.pinned));
+                // Every tab draws the same history list, so all of them have to be told.
+                broadcast();
+            }
         } else if (m.type === 'ccx:hideMessages') {
             const id = m.sessionId || sessionId;
             if (id) {

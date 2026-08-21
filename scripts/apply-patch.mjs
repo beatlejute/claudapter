@@ -74,7 +74,7 @@ const PATCHES = [
             '["ccx-provider","model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]/*__ccx*/',
         where: 'replace',
     },
-    // --- Search sessions by content (three hooks in the same session-list component) -------------
+    // --- Search sessions by content, and pinned sessions (three hooks in one component) ----------
     //
     // The stock search box only matches a row's title and git branch, both computed client-side. A
     // query the user actually typed to find a conversation is usually neither — it is something that
@@ -83,17 +83,24 @@ const PATCHES = [
     // structurally because a `$`-prefixed parameter name (`$e`) needs `[\w$]+`, not `\w+`, to survive
     // the round trip; a plain `\w+` silently fails to match on this component and nowhere else.
     {
-        // Right where the search query's own state is declared: adds a second state pair for the
-        // ids the host reports back, and hands its setter to the page in the same expression, the same
-        // way injection point #4 hands over the registry and session. Both hook aliases are captured
-        // rather than hardcoded — useState (2.1.233: `ne`, 2.1.235–2.1.238: `ie`) and useRef (2.1.235:
-        // `ge`, 2.1.238: `_e`) are locals like any other, and the minifier renames them at will. The
-        // useRef one was hardcoded until 2.1.238 renamed it and this was the only signature to break.
+        // Right where the search query's own state is declared: adds two more state pairs — the ids
+        // the host reports back for content search, and the pinned session ids — and hands both
+        // setters to the page in the same expression, the same way injection point #4 hands over the
+        // registry and session. Both hook aliases are captured rather than hardcoded — useState
+        // (2.1.233: `ne`, 2.1.235–2.1.238: `ie`) and useRef (2.1.235: `ge`, 2.1.238: `_e`) are locals
+        // like any other, and the minifier renames them at will. The useRef one was hardcoded until
+        // 2.1.238 renamed it and this was the only signature to break.
+        //
+        // Pinning has to be state rather than a value the page reads at render time: nothing in the
+        // component re-runs when a pin is toggled, so without a state write the list would keep its
+        // old order until something else happened to re-render it.
         file: 'webview/index.js',
         find: /,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=([\w$]+)\(new Map\)/,
         replace: (_found, query, setQuery, useState, renaming, setRenaming, refs, useRef) =>
             `,[${query},${setQuery}]=${useState}(""),[ccxContentMatches,ccxSetContentMatches]=${useState}(null),` +
+            `[ccxPinnedIds,ccxSetPinnedIds]=${useState}(null),` +
             `ccxHandoff=(globalThis.__ccx&&globalThis.__ccx.onSearchState&&globalThis.__ccx.onSearchState(ccxSetContentMatches)),` +
+            `ccxPinHandoff=(globalThis.__ccx&&globalThis.__ccx.onPinState&&globalThis.__ccx.onPinState(ccxSetPinnedIds)),` +
             `[${renaming},${setRenaming}]=${useState}(null),${refs}=${useRef}(new Map)`,
         where: 'replace',
     },
@@ -101,13 +108,20 @@ const PATCHES = [
         // The title/branch filter itself: OR in a content match, and expose the unfiltered candidate
         // list globally in the same expression — the onChange hook below needs it, and this is the one
         // place its variable name (`te`, but renamed on every release) is already in scope and captured.
+        //
+        // The result then goes through pinSort, which floats the pinned sessions to the front. This is
+        // the list the app renders AND the one it builds its keyboard-navigation index from, so
+        // sorting it here — rather than moving rows in the DOM — keeps arrow keys agreeing with what
+        // is on screen, and survives every re-render because it is part of the render.
         file: 'webview/index.js',
         find: /([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3/,
         replace: (_found, result, query, source, item, lowerQ, titleFn) =>
-            `${result}=(globalThis.__ccxSearchCandidates=${source},${query}?${source}.filter((${item})=>{` +
+            `${result}=(globalThis.__ccxSearchCandidates=${source},` +
+            `((ccxL)=>globalThis.__ccx&&globalThis.__ccx.pinSort?globalThis.__ccx.pinSort(ccxL,ccxPinnedIds):ccxL)(` +
+            `${query}?${source}.filter((${item})=>{` +
             `let ${lowerQ}=${query}.toLowerCase();return ${titleFn}(${item}).toLowerCase().includes(${lowerQ})||` +
             `(${item}.gitBranch.value?.toLowerCase().includes(${lowerQ})??!1)||` +
-            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)}):${source})`,
+            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)}):${source}))`,
         where: 'replace',
     },
     {

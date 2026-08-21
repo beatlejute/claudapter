@@ -29,6 +29,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Compact before switching** — on a tab with history the switch first asks *Compact & switch* / *Switch as is*. The prompt cache never survives a provider change, so the first turn on the new backend pays for the whole transcript either way; sending the compact summary instead of the raw history is what makes it cheaper, and it keeps a long conversation inside a smaller window on the other side. It is a question, not a default — compaction discards detail. Left unanswered it switches as is; if the compaction never reports back it switches as is after 90 s. A tab with nothing to compact is never asked.
 - **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
 - **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
+- **Pinned sessions** — hover a row in the session history and click the pin: it moves to the top of the list and stays there, above everything else, however old it gets. A search still applies — a pinned row that no longer matches is filtered out like any other, and the ones that do match keep their place at the front. The pins live in `~/.claude/claudapter/pinned.json` and are shared by every tab.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
 - **Message timestamps** — every turn in the transcript gets a small local time, chat-app style, and a date separator ("Today", "Yesterday", or the date) wherever the day changes. Read straight off each message's own `.jsonl` timestamp, so it reflects when the turn actually happened, not when it rendered.
 - **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
@@ -243,8 +244,8 @@ VS Code extension host                     webview (UI)
 | 3 | `extension.js` | `…pathToClaudeCodeExecutable=…,…env=…` + its terminator, in `spawnClaude` | **substitute `ANTHROPIC_*` when the process starts** |
 | 4 | `webview/index.js` | *structural* — the three reads before `registerAction({id:"model"` | their command registry, jsx factory **and the session object** |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
-| 6 | `webview/index.js` | *structural* — the session list's `[query,setQuery]=ne(""),[renaming,…]=ne(null),refs=ge(new Map)` | a second state pair for content-search results, and hands its setter over |
-| 7 | `webview/index.js` | *structural* — the title/branch filter expression that follows it | ORs in a content match, and exposes the unfiltered row list globally |
+| 6 | `webview/index.js` | *structural* — the session list's `[query,setQuery]=ne(""),[renaming,…]=ne(null),refs=ge(new Map)` | two more state pairs — content-search results and pinned ids — and hands both setters over |
+| 7 | `webview/index.js` | *structural* — the title/branch filter expression that follows it | ORs in a content match, sorts pinned rows to the front, and exposes the unfiltered row list globally |
 | 8 | `webview/index.js` | `onChange:(e)=>J(e.target.value),placeholder:"Search sessions…"` | forwards every keystroke to the host-side transcript search |
 
 ### Sending an attachment on its own
@@ -403,6 +404,26 @@ new keystroke clears the previous result immediately so a stale match never ling
 and each session's transcript text is cached on disk mtime so re-searching an unchanged session costs
 nothing. Only the **Local** tab is covered — remote/cloud sessions have no on-disk transcript to grep.
 
+### Pinning a session to the top
+
+The list is ordered by the app, by recency, and re-derived from scratch on every render — so a pin
+cannot be a DOM move: the next commit would undo it. It is a **sort**, applied at the same place
+injection point #7 already sits, on the list the app is about to render. That list is also the one it
+builds its keyboard-navigation index from, so arrow keys keep agreeing with what is on screen, and
+the order survives every re-render because it *is* part of the render.
+
+Search and pinning compose in the only way that makes sense: the sort runs on whatever survived the
+filter. With an empty query that is every session, so the pins sit at the very top; with a query it is
+the matching ones, so a pinned session that does not match is not shown — a pin is a position, not an
+exemption.
+
+Ordering has to reach the component as state or nothing re-renders when a pin is toggled, which is why
+injection point #6 declares a state pair for it and hands the setter to the page. The page stays the
+owner of the value — the host's `pinned.json` is the record, every tab is told about a change, and the
+row moves optimistically on the click rather than a round trip later. The control itself is a real
+child node appended to the row (a pseudo-element could not be clicked), restored by the same observer
+pass that draws the provider icons if a commit ever moves it.
+
 A detailed teardown of the extension is in [docs/internals.md](docs/internals.md).
 
 ### Choosing the profile at launch
@@ -418,6 +439,7 @@ Keys "owned" by profiles are computed as the union of every `env` across `~/.cla
 ### Storage
 
 - `~/.claude/claudapter/bindings.json` — `{ sessionId: profileName }`, survives VS Code restarts. It is also what the history list reads to mark each row; a session that was never launched through Claudapter has no entry and falls back to the profile matching `settings.json`.
+- `~/.claude/claudapter/pinned.json` — the session ids pinned to the top of the history list, in the order they were pinned. Shared by every tab; an entry is dropped when its session is deleted.
 - the tab's profile in memory — for the window between choosing a provider and the session being created
 - `~/.claude/settings.json` is **never modified**
 
@@ -469,3 +491,4 @@ To confirm a provider really took effect, look at **Output → Claude VSCode**: 
 - **Log noise.** The extension logs `Unknown message: [object Object]` for every `ccx:*` message — its handler does not know these types. Harmless.
 - **Model entry names** come from the CLI's own catalog and cannot be renamed, so real model names are appended as a separate label.
 - **Session binding** appears only after the first response in a session — before that the id does not exist yet.
+- **Pinning inside session groups.** When the list is showing groups, the app renders every group before the ungrouped rows and pinning cannot cross that boundary — a pinned session rises to the top of its own section, not above the groups. Ungrouped lists, which is what the panel shows until groups are created, put pins at the very top.
