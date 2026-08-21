@@ -44,6 +44,9 @@ for (const file of ['host.js', 'webview.js']) {
 const proxySrc = path.join(ROOT, 'src', 'proxy');
 if (existsSync(proxySrc)) console.log(`runtime: ${copyDir(proxySrc, path.join(RUNTIME, 'proxy'))} proxy file(s)`);
 
+const mcpSrc = path.join(ROOT, 'src', 'mcp');
+if (existsSync(mcpSrc)) console.log(`runtime: ${copyDir(mcpSrc, path.join(RUNTIME, 'mcp'))} mcp file(s)`);
+
 // Template profiles are only added when missing — existing keys are never overwritten
 const templates = path.join(ROOT, 'templates', 'profiles');
 const profilesDir = path.join(homedir(), '.claude', 'profiles');

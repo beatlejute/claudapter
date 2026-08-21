@@ -121,6 +121,19 @@ The adapter starts itself when such a profile is selected: the host sees `127.0.
 
 For other providers just change the path segment: `http://127.0.0.1:8787/openrouter`, `/groq`, `/ollama`. The list and addresses live in `src/proxy/server.mjs` (`DEFAULTS.upstreams`) and can be overridden by `~/.claude/claudapter/proxy.json`.
 
+**Sending one subagent to another provider.** A session is bound to one upstream by its profile, but a subagent can override that per-request through its `model:` field, which the proxy reads before routing:
+
+```markdown
+---
+name: my-codex-agent
+model: "@codex"                 # route to the codex upstream, default (sonnet) model
+# or
+model: "@deepseek:claude-opus-4-8"   # route to deepseek, resolve that model by deepseek's rules
+---
+```
+
+The `@<upstream>` name must be a key in the proxy's `upstreams` (the same names as the URL path segments); an unknown one 404s. The `<model>` after the colon is resolved by the target profile's `ANTHROPIC_DEFAULT_*` / `modelOverrides` rules, or passed through untouched when it is not a `claude-*` id.
+
 ### Mode B: ChatGPT subscription
 
 ```bash
@@ -173,6 +186,36 @@ the adapter's route from a shell that has different ones would otherwise give a 
 `400 Missing parameter` = the route works; `403 unsupported_country` = the request bypassed the proxy.
 
 If `~/.claude/claudapter/proxy.log` shows `error 403 upstream 403: <html>`, the adapter was started before `proxy.json` existed and is going out directly. Kill the process listening on that port; VS Code will start a new one with the variables applied.
+
+## Delegating a task to another provider
+
+A session is bound to one provider for its whole life, and a subagent cannot change that: its frontmatter has no `env` and no endpoint field, so it always inherits the parent's `ANTHROPIC_BASE_URL` and credentials. The one place a provider can still change is where a process is born — the same lever this project already pulls per tab.
+
+`src/mcp/agent-server.mjs` is a stdio MCP server that does exactly that for a delegated task: it spawns `claude -p` with the environment of a profile from `~/.claude/profiles` and returns the answer as a tool result.
+
+```bash
+npm run setup          # copies the server into ~/.claude/claudapter/mcp
+npm run mcp:install    # registers it with Claude Code at user scope
+npm run mcp:status     # what is registered
+npm run mcp:remove     # unregister
+```
+
+Then, in any tab: *"ask deepseek to review this file"* — Claude calls `run_agent` with `profile: "deepseek"`, and the run goes out on DeepSeek's endpoint and key while the tab stays where it was.
+
+Two tools are exposed:
+
+- **`list_profiles`** — every profile, its endpoint, and the model each family alias maps to.
+- **`run_agent`** — `profile` and `prompt` are required; `agent`, `model`, `effort`, `mode`, `cwd` and `timeout_ms` are optional.
+
+Notes worth knowing before relying on it:
+
+- **The delegated agent shares no context** with the calling session — the prompt has to carry every fact it needs. It reads files itself, so paths are usually enough.
+- **`mode` defaults to `read`** (Read, Grep, Glob, WebFetch, WebSearch). `write` auto-accepts file edits, `full` bypasses permission checks — the provider on the other end is not the one you are watching, so the default stays read-only.
+- **`model` defaults to the `sonnet` alias**, which each profile maps through its own `ANTHROPIC_DEFAULT_SONNET_MODEL`. A literal id is sent to the provider untouched.
+- **Credentials never cross.** The calling session's `ANTHROPIC_*` variables are stripped before the profile's own are applied — including for the subscription profile, whose empty `env` would otherwise inherit whatever the caller was using.
+- **Delegation depth is capped at 2**, so an agent can delegate once and no further.
+- **A refusing provider is reported, not waited out.** An exhausted balance or a spent quota comes back as `429`, which the CLI treats as retryable and backs off on until the timeout kills the task — fifteen minutes to learn nothing. One `max_tokens: 1` call goes out first, and a refusal is returned in the provider's own words in about a second (*"Insufficient balance. Please recharge."*, *"Your token-plan 1-week quota has been exhausted"*). A probe that times out or cannot connect never blocks the run — it proves nothing the real attempt will not find out itself. Set `CLAUDAPTER_SKIP_PREFLIGHT=1` to turn it off.
+- The run is recorded in `bindings.json`, so it carries its provider's icon in the session history like any tab.
 
 ## How it works
 
