@@ -249,9 +249,9 @@ state and the per-row ref map already form:
 ,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=([\w$]+)\(new Map\)
 ```
 
-It inserts a second state pair — the ids the host reports back — right after the query state, and
-hands its setter to `globalThis.__ccx.onSearchState` in the same expression, the same trick point #4
-uses for the registry and session.
+It inserts two more state pairs right after the query state — the ids the host reports back for
+content search, and the pinned session ids — and hands both setters to `globalThis.__ccx` in the same
+expression, the same trick point #4 uses for the registry and session.
 
 Both hook aliases are captured rather than hardcoded, the same reasoning as everywhere else in this
 file: they are locals among many, and the minifier renames them at will. This signature has been
@@ -273,8 +273,9 @@ Point #7 is the filter expression itself:
 ([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3
 ```
 
-It ORs in a content match, and — in the same expression, via the comma operator — assigns the
-unfiltered row array to `globalThis.__ccxSearchCandidates`. That assignment is the only reason point
+It ORs in a content match, passes the result through `globalThis.__ccx.pinSort` (see the next
+section), and — in the same expression, via the comma operator — assigns the unfiltered row array to
+`globalThis.__ccxSearchCandidates`. That assignment is the only reason point
 #8 does not need to capture the row array’s own name: it is a different statement, a good way down
 the same component, and re-anchoring across that whole span for one variable would trade two small,
 independent matches for one large, fragile one. Reading it off `globalThis` instead costs nothing —
@@ -297,6 +298,43 @@ The host side greps each requested session’s raw `.jsonl` text case-insensitiv
 it — the query sits in the encoded message content either way, and parsing every line just to throw
 the structure away would buy nothing — and caches the lowercased text per session on file mtime, so a
 session unchanged since the last keystroke costs nothing to check again.
+
+### Pinning is a sort, not a DOM move
+
+The row a pin acts on is not the page's to keep. The session list is re-derived from the app's own
+array on every render, and the array is ordered by recency — move the node and the next commit puts
+it back. So pinning reuses point #7: the same expression that widens the filter also sorts its
+result, pinned ids first, before the component ever sees the list.
+
+That placement buys two things a DOM reorder cannot. The sorted array is what the component maps to
+rows *and* what it builds `Or = new Map(Kt.map((s, i) => [s, i]))` from — its keyboard-navigation
+index — so arrow keys walk the list in the order that is actually on screen. And it composes with
+search for free: the sort runs on whatever survived the filter, so an empty query puts the pins at the
+very top and a query puts them at the top of the matches, with a pinned row that does not match simply
+absent. A pin is a position, not an exemption.
+
+The one thing the sort cannot do is re-render itself. Nothing in the component depends on the page's
+copy of the pinned set, so a toggle would sit invisible until some unrelated state changed — which is
+why point #6 declares a state pair for it and `onPinState` takes the setter. The page stays the owner:
+`pinned.json` on the host is the record, `broadcast()` tells every tab, and `pushPinned()` writes a
+fresh `Set` into the component's state, the new identity being the whole re-render signal. It is
+skipped when membership is unchanged, so an ordinary state push does not re-render the list for
+nothing. The click updates the page's own set first and sends to the host second — a pin that waited
+for the round trip would read as a dropped click.
+
+The control itself is the one decoration in the session list that could not be a pseudo-element:
+`::before` on the row is already the provider mark, and neither can be clicked. It is a real `<span
+role="button">` appended as the row's last child — past `sessionMeta`, so it lands at the right edge —
+and the observer pass that draws the provider icons re-appends it if a commit ever moves it. React
+reconciles the row's own children by position and never sees a trailing node that is not in its list.
+The click handler reads the session id back off `dataset` rather than closing over it, because the
+list re-keys and a DOM node can be reused for a different session.
+
+Group headers are where this stops being exact. When the app is showing session groups it renders
+`[...grouped, ...ungrouped]`, and the grouping runs *after* the sort — so a pin rises to the top of its
+own section, not above the groups. Hoisting across that boundary would mean rebuilding the list's JSX
+rather than reordering its input, which is a much larger and much more fragile patch for a case the
+panel does not show until groups are created.
 
 ### Compacting before a switch rides on the stock `/compact`
 

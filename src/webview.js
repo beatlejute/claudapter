@@ -47,6 +47,12 @@
     // history is rebuilt without one, so a resumed transcript reports "now" for every past message.
     var messageTimes = {};
     var messageTimesSession = null;
+    // The pinned session ids, mirrored from the host. Two consumers: the row marks, drawn from the
+    // DOM side, and the session list's own ordering, which only ever sees what pushPinned() hands
+    // to its state setter — the component re-reads nothing on its own.
+    var pinnedIds = new Set();
+    var pinSetter = null;
+    var pinPushed = null;
 
     function send(message) {
         rawPost(message);
@@ -210,6 +216,7 @@
                 sessionId: d.sessionId || state.sessionId,
             };
             adoptAttachmentPrompts(d.attachmentPrompts);
+            adoptPinned(d.pinnedSessions);
             // Retracted uuids arrive from the host; a session change resets the set, otherwise the
             // host's list merges in (the host only ever adds, so local in-flight additions survive).
             if (state.sessionId !== hiddenSession) {
@@ -556,10 +563,164 @@
         try {
             // The _<hash> suffix is a CSS-module content hash — match by prefix, never literally
             var rows = document.querySelectorAll('button[class*="sessionItem_"]');
-            for (var i = 0; i < rows.length; i++) applyRowIcon(rows[i]);
+            for (var i = 0; i < rows.length; i++) {
+                applyRowIcon(rows[i]);
+                applyRowPin(rows[i]);
+            }
         } catch (e) {
             /* an unrecognised list is a list without icons, not a broken webview */
         }
+    }
+
+    // --- Pinned sessions ----------------------------------------------------------------------
+    //
+    // The history list is ordered by the app, by recency, and re-derived on every render — so a pin
+    // cannot be a DOM move: the next commit would undo it. It is a sort instead, applied where the
+    // list is computed (injection point #7), which puts the row above the rest for the app's own
+    // keyboard navigation too, not just visually.
+    //
+    // Ordering has to reach the component as state or nothing re-renders when a pin is toggled, so
+    // the patch declares a state pair for it and hands the setter over here, the same way content
+    // search does. The page stays the owner of the value; the state pair is what makes it visible.
+    function adoptPinned(list) {
+        if (!Array.isArray(list)) return;
+        var next = new Set();
+        for (var i = 0; i < list.length; i++) if (typeof list[i] === 'string' && list[i]) next.add(list[i]);
+        pinnedIds = next;
+        pushPinned();
+    }
+
+    function samePins(a, b) {
+        if (!a || !b || a.size !== b.size) return false;
+        var values = a.values();
+        for (var v = values.next(); !v.done; v = values.next()) if (!b.has(v.value)) return false;
+        return true;
+    }
+
+    // A fresh Set every time, because that identity is the whole re-render signal — but only when
+    // the membership actually changed, or every state push would re-render the list for nothing.
+    function pushPinned() {
+        if (!pinSetter || samePins(pinPushed, pinnedIds)) return;
+        pinPushed = new Set(pinnedIds);
+        pinSetter(pinPushed);
+    }
+
+    // Called from the component's own render, on every render — hence the identity guard: writing
+    // state from inside a render is what it exists to avoid, and the setter is stable across them.
+    function onPinState(setter) {
+        if (setter === pinSetter) return;
+        pinSetter = setter;
+        pinPushed = null;
+        setTimeout(pushPinned, 0);
+    }
+
+    // A stable partition, not a comparator: pinned rows move to the top as a block and keep the
+    // list's own recency order inside it, so pinning one session never reorders the others.
+    //
+    // The second argument is what the component last received. Before the first push it is null and
+    // the page's own copy stands in — it is authoritative either way, and the two only differ for
+    // the one render between a toggle and the state write landing.
+    function pinSort(list, fromState) {
+        try {
+            var pins = fromState && typeof fromState.has === 'function' ? fromState : pinnedIds;
+            if (!pins || !pins.size || !list || !list.length) return list;
+            var top = [];
+            var rest = [];
+            for (var i = 0; i < list.length; i++) {
+                var session = list[i];
+                var id = session && session.sessionId && session.sessionId.value;
+                (id && pins.has(id) ? top : rest).push(session);
+            }
+            return top.length && rest.length ? top.concat(rest) : list;
+        } catch (e) {
+            /* an unrecognised list is an unsorted list, not a broken history panel */
+            return list;
+        }
+    }
+
+    function togglePin(sessionId) {
+        if (!sessionId) return;
+        var pinned = !pinnedIds.has(sessionId);
+        // Optimistic: the host echoes the authoritative list back on the next ccx:state, but the row
+        // has to move now, not a round trip later.
+        if (pinned) pinnedIds.add(sessionId);
+        else pinnedIds.delete(sessionId);
+        pushPinned();
+        decorateSessionList();
+        send({ type: 'ccx:pinSession', sessionId: sessionId, pinned: pinned });
+    }
+
+    var PIN_PATHS = [
+        'M12 17v5',
+        'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z',
+    ];
+
+    // Built node by node rather than through innerHTML: the webview runs under a content policy that
+    // can treat a markup string as a script sink, and this needs no markup to begin with.
+    function pinGlyph() {
+        var ns = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(ns, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('width', '12');
+        svg.setAttribute('height', '12');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-width', '2');
+        svg.setAttribute('stroke-linecap', 'round');
+        svg.setAttribute('stroke-linejoin', 'round');
+        svg.setAttribute('aria-hidden', 'true');
+        for (var i = 0; i < PIN_PATHS.length; i++) {
+            var path = document.createElementNS(ns, 'path');
+            path.setAttribute('d', PIN_PATHS[i]);
+            svg.appendChild(path);
+        }
+        return svg;
+    }
+
+    // Unlike the provider mark this cannot be a pseudo-element — it has to be clickable — so it is a
+    // real child, appended last so it lands past the time column. React owns the row's other
+    // children and reconciles them by position; an extra trailing node is outside that list, and the
+    // observer pass puts it back at the end if a commit ever does move it.
+    function applyRowPin(row) {
+        var id = null;
+        try {
+            id = sessionIdOfRow(row);
+        } catch (e) {
+            id = null;
+        }
+        var pin = row.querySelector(':scope > .ccx-pin');
+        // An unresolved row has no id to pin, and pinning the wrong session is worse than not
+        // offering it — the same rule the provider icon follows.
+        if (!id) {
+            if (pin) pin.remove();
+            return;
+        }
+        if (!pin) {
+            pin = document.createElement('span');
+            pin.className = 'ccx-pin';
+            pin.setAttribute('role', 'button');
+            pin.appendChild(pinGlyph());
+            // The row is itself a <button> that opens the session, and the list runs its own
+            // selection handling off mousedown — neither may see this one.
+            pin.onmousedown = function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            };
+            pin.onclick = function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                togglePin(pin.dataset.ccxSession || '');
+            };
+            row.appendChild(pin);
+        } else if (row.lastElementChild !== pin) {
+            row.appendChild(pin);
+        }
+        // Read back at click time rather than closed over: a row's DOM node is reused when the list
+        // re-keys, and a captured id would then pin whatever used to sit in that slot.
+        pin.dataset.ccxSession = id;
+        var pinned = pinnedIds.has(id);
+        pin.dataset.ccxPinned = pinned ? '1' : '0';
+        pin.title = pinned ? 'Unpin from the top of the list' : 'Pin to the top of the list';
     }
 
     // --- Message timestamps, chat-app style --------------------------------------------------
@@ -1865,6 +2026,8 @@
         },
         onSearchState: onSearchState,
         onSearchQuery: onSearchQuery,
+        onPinState: onPinState,
+        pinSort: pinSort,
         retract: retractLastMessage,
     };
 
@@ -1886,6 +2049,13 @@
         // The row is display:flex;align-items:center;gap:8px, so ::before simply becomes its leading flex
         // item and the flex:1 title still ellipsizes. No child node, so nothing for React to reconcile.
         'button[data-ccx-provider]::before{content:"";flex:0 0 auto;width:13px;height:13px;margin-right:-3px;border-radius:3px;background-image:var(--ccx-icon);background-size:contain;background-position:center;background-repeat:no-repeat;opacity:.9}',
+        // A fixed slot on every row, hidden rather than absent, so nothing shifts when a row is
+        // hovered. Only a pinned row keeps it lit once the pointer leaves.
+        '.ccx-pin{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:16px;height:16px;margin-left:2px;margin-right:-2px;border-radius:4px;cursor:pointer;visibility:hidden;color:var(--app-secondary-foreground, var(--vscode-descriptionForeground, var(--vscode-foreground)))}',
+        'button[class*="sessionItem_"]:hover .ccx-pin,button[class*="sessionItem_"][class*="focused_"] .ccx-pin,.ccx-pin[data-ccx-pinned="1"]{visibility:visible}',
+        '.ccx-pin[data-ccx-pinned="1"]{color:var(--app-link-foreground, var(--vscode-textLink-foreground, var(--vscode-foreground)))}',
+        '.ccx-pin[data-ccx-pinned="1"] svg{fill:currentColor;fill-opacity:.22}',
+        '.ccx-pin:hover{background:var(--app-ghost-button-hover-background, var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.2)));color:var(--app-primary-foreground, var(--vscode-foreground))}',
         // A gutter, not a line of its own: pinned into the left margin the time sits beside the
         // message's opening line and costs no height at all, which is what the stock tool-call rows
         // already look like — rail, dot, time, content.
