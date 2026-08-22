@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.238**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). Everything else held: all eight signatures match 2.1.238 with that one capture generalised and nothing else touched, so the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.239**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, so the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -58,7 +58,7 @@ Every identifier there is a minified local, and the minifier reshuffles them rel
 | 2.1.228 | `f.env=v;` | `;` |
 | 2.1.229 | `f.env=v;` | `;` |
 | 2.1.231–2.1.235 | `f.env=v;` | `;` |
-| 2.1.238 | `h.env=y;` | `;` |
+| 2.1.238–2.1.239 | `h.env=y;` | `;` |
 
 2.1.227 is the one that changed the **shape**, not just the names. Up to 2.1.226 the three assignments were the condition of an `if`, with the node path as the last operand of the comma expression:
 
@@ -218,17 +218,29 @@ Both objects are in scope at the registration, so the signature became structura
 session too:
 
 ```js
-/let (\w+)=(\w+)\.modelSelection\.value,(\w+)=\w+\(\2\.claudeConfig\.value\),(\w+)=\w+\(\1,\2\.lastServedModel\.value,\3\);(\w+)\.commandRegistry\.registerAction\(\{id:"model"/
+/let ([\w$]+)=([\w$]+)\.modelSelection\.value,([\w$]+)=[\w$]+\(\2\.claudeConfig\.value\),([\w$]+)=[\w$]+\(\1,\2\.lastServedModel\.value,\3\);([\w$]+)\.commandRegistry\.registerAction\(\{id:"model",label:"Switch model…",description:"Change the AI model",trailingComponent:\4\?([\w$]+)\("span"/
 ```
 
 The three reads in front are what pin the capture to the session rather than to whatever else the
 minifier happens to call `t`, and the back-references keep all three on one object. One match in
-2.1.227–2.1.233, always `session=t, ctx=n`.
+2.1.227–2.1.239, always `session=t, ctx=n`.
+
+Two halves of it stayed name-shaped for six releases, and 2.1.239 collected on both. The helper
+calls were spelled `\w+`, and 2.1.239 renamed the `claudeConfig` one to `$b` — so the signature fell to
+zero hits over a name it was not even capturing, the identifier-class trap the content-search points
+below document at length. And the jsx factory went into the *replacement* as a bare `b`. That one has
+never been renamed, but it is the worse of the two failure modes: a broken signature stops the
+patcher with a hit count, while a stale `b` patches cleanly and throws a ReferenceError the moment
+the composer renders. It is now captured off the `trailingComponent:` expression three literal
+strings further into the same registration — `label:"Switch model…"`, `description:"Change the AI
+model"`, then `trailingComponent:<label>?<jsx>("span"` — which is the most stable anchor available
+without leaving the statement.
 
 A DOM-level test cannot catch a mismatch here on its own — a fake context object carrying an
 `activeSession` field passes while the real one has none, which is precisely how this got through the
 first time. So the test also reads both sources and asserts that the patcher passes a third argument,
-that the hook accepts it, and that the page never reads the session off the context object.
+that it no longer writes the jsx factory in by name, that the hook accepts the session, and that the
+page never reads the session off the context object.
 
 ### Content search reuses the session-list handoff — and needs `$` in its identifier class
 
