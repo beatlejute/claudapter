@@ -40,8 +40,24 @@ writeProfile('codex', {
 process.env.CLAUDAPTER_PROFILES_DIR = profiles;
 process.env.CLAUDAPTER_RUNTIME_DIR = runtime;
 
-const { TOOLS, callTool, handle, envForProfile, describeProfile, preflight, providerMessage, tokenSummary, MODES } =
-    await import('../src/mcp/agent-server.mjs');
+const {
+    TOOLS,
+    callTool,
+    handle,
+    envForProfile,
+    describeProfile,
+    describeHealth,
+    preflight,
+    providerMessage,
+    parseResetAt,
+    usageTotals,
+    formatTokens,
+    formatCost,
+    describeModel,
+    execAllowlist,
+    MODES,
+    MODE_ALIASES,
+} = await import('../src/mcp/agent-server.mjs');
 
 // Collects everything the server writes to stdout while running `fn`
 async function capture(fn) {
@@ -79,9 +95,13 @@ async function main() {
     // --- tools/list
     out = await capture(() => handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' }));
     const names = out[0].result.tools.map((t) => t.name).sort();
-    assert.deepStrictEqual(names, ['list_profiles', 'run_agent'], 'both tools listed');
+    assert.deepStrictEqual(names, ['check_agent', 'list_profiles', 'run_agent', 'stop_agent'], 'every tool listed');
     const runAgent = TOOLS.find((t) => t.name === 'run_agent');
-    assert.deepStrictEqual(runAgent.inputSchema.required, ['profile', 'prompt'], 'profile and prompt are required');
+    // profile is not required any more: a resumed session already knows which provider it belongs to
+    assert.deepStrictEqual(runAgent.inputSchema.required, ['prompt'], 'only the prompt is always required');
+    assert.ok(runAgent.inputSchema.properties.session, 'a run can be continued');
+    assert.ok(runAgent.inputSchema.properties.background, 'a run can be backgrounded');
+    assert.deepStrictEqual(runAgent.inputSchema.properties.mode.enum, ['read', 'exec', 'write', 'full']);
 
     // --- unknown method
     out = await capture(() => handle({ jsonrpc: '2.0', id: 3, method: 'tools/nope' }));
@@ -132,8 +152,31 @@ async function main() {
 
     // --- modes map to the flags that bound what a delegated agent may do
     assert.deepStrictEqual(MODES.read, ['--allowedTools', 'Read,Grep,Glob,WebFetch,WebSearch'], 'read mode is a read-only allowlist');
-    assert.deepStrictEqual(MODES.write, ['--permission-mode', 'acceptEdits']);
     assert.deepStrictEqual(MODES.full, ['--permission-mode', 'bypassPermissions']);
+
+    // exec is read plus a shell that can only collect. The commands a data-gathering task actually
+    // needs have to be on it — without them the run burns its budget being refused — and the ones
+    // that change the tree must not be.
+    const exec = MODES.exec[1].split(',');
+    assert.strictEqual(MODES.exec[0], '--allowedTools');
+    for (const tool of ['Read', 'Grep', 'Glob']) assert.ok(exec.includes(tool), `exec keeps ${tool} from read`);
+    for (const rule of ['Bash(git log:*)', 'Bash(git diff:*)', 'Bash(python:*)', 'Bash(awk:*)', 'Bash(find:*)', 'Bash(wc:*)'])
+        assert.ok(exec.includes(rule), `exec allows ${rule}`);
+    for (const banned of ['Bash(rm:*)', 'Bash(mv:*)', 'Bash(cp:*)', 'Bash(curl:*)', 'Bash(wget:*)', 'Bash(git push:*)', 'Bash(npm install:*)'])
+        assert.ok(!exec.includes(banned), `exec does not allow ${banned}`);
+    assert.ok(!exec.includes('Edit') && !exec.includes('Write'), 'exec cannot edit files');
+
+    // A PreToolUse hook may rewrite `git log` to `rtk git log` before the permission check sees it,
+    // and the allowlist has to match what the check reads, not what the model wrote
+    assert.ok(exec.includes('Bash(rtk git log:*)'), 'wrapped commands are allowed too');
+    assert.ok(execAllowlist().every((r) => r.startsWith('Bash(') && r.endsWith(':*)')), 'every rule is a bash prefix rule');
+
+    // write is exec plus auto-accepted edits: a run that may rewrite a file must be able to run the
+    // test that proves it still works
+    assert.strictEqual(MODES.write[0], '--permission-mode');
+    assert.strictEqual(MODES.write[1], 'acceptEdits');
+    assert.deepStrictEqual(MODES.write.slice(2), MODES.exec, 'write is a superset of exec');
+    assert.strictEqual(MODE_ALIASES['read+exec'], 'exec', 'the name the mode was asked for still works');
 
     // --- bad calls are reported as tool errors the model can correct, not as transport failures
     out = await capture(() =>
@@ -231,16 +274,164 @@ async function main() {
     provider.close();
     assert.strictEqual(providerMessage('{"error":{"message":"deep"}}'), 'deep');
     assert.strictEqual(providerMessage('{"message":"flat"}'), 'flat');
-
-    // --- the run is summarised in tokens, not in the CLI's dollar figure: that one prices every
-    //     provider against Anthropic's table and is wrong by an order of magnitude off it
-    assert.strictEqual(tokenSummary({ input_tokens: 20790, output_tokens: 62 }), 'tokens: 20,790 in / 62 out');
+    // the adapter hands an upstream refusal on with a sentence in front of the JSON
     assert.strictEqual(
-        tokenSummary({ input_tokens: 1200, output_tokens: 40, cache_read_input_tokens: 800, cache_creation_input_tokens: 200 }),
-        'tokens: 1,200 in / 40 out (+1,000 cached)',
+        providerMessage('upstream 429: {"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}'),
+        'The usage limit has been reached',
+        'a wrapped body still yields the provider’s own sentence',
     );
-    assert.strictEqual(tokenSummary({ input_tokens: 0, output_tokens: 0 }), null, 'an empty count is left out entirely');
-    assert.strictEqual(tokenSummary(undefined), null, 'a result with no usage block is left out too');
+
+    // --- a refusal that says when it lifts is the difference between waiting and switching
+    const noon = Date.parse('2026-08-21T12:00:00Z');
+    assert.strictEqual(
+        parseResetAt('upstream 429: {"error":{"resets_at":1787826173,"resets_in_seconds":530718}}', null, noon),
+        new Date(1787826173000).toISOString(),
+        'a unix resets_at wins over the countdown beside it',
+    );
+    assert.strictEqual(
+        parseResetAt('{"message":"slow down"}', new Headers({ 'retry-after': '120' }), noon),
+        new Date(noon + 120000).toISOString(),
+        'a retry-after header counts as a reset time',
+    );
+    assert.strictEqual(
+        parseResetAt('Your token-plan 1-week quota has been exhausted. The quota will reset at 08-27 08:17:00 UTC.', null, noon),
+        '2026-08-27T08:17:00.000Z',
+        'a reset stated in words is understood',
+    );
+    // a month/day with no year that already passed belongs to next year, not this one
+    assert.strictEqual(
+        parseResetAt('The quota will reset at 01-05 00:00:00 UTC.', null, noon),
+        '2027-01-05T00:00:00.000Z',
+        'a date already behind us rolls into next year',
+    );
+    assert.strictEqual(parseResetAt('plain refusal', null, noon), null, 'a refusal that says nothing yields nothing');
+
+    // --- the last thing a provider said, shown in the listing so a spent quota is known before a
+    //     call rather than during one
+    const health = {
+        glm: { at: new Date(noon - 300000).toISOString(), ok: false, status: 429, message: 'Insufficient balance.' },
+        qwen: { at: new Date(noon - 60000).toISOString(), ok: false, status: 429, message: 'Quota exhausted.', resets_at: '2026-08-27T08:17:00.000Z' },
+        deepseek: { at: new Date(noon - 3600000).toISOString(), ok: true },
+    };
+    assert.match(describeHealth('glm', noon, health), /FAILED 5m ago · HTTP 429 · Insufficient balance\./);
+    assert.match(describeHealth('qwen', noon, health), /resets 2026-08-27 08:17Z \(in 5d 20h\)/, 'and when it lifts');
+    assert.strictEqual(describeHealth('deepseek', noon, health), 'ok 60m ago');
+    assert.strictEqual(describeHealth('codex', noon, health), '', 'a profile never called says nothing — silence is not health');
+    assert.match(describeProfile('qwen', noon, health), /\n {4}FAILED/, 'the status hangs under the profile line');
+
+    // --- spend: the same four columns for every provider, from the whole-run totals
+    //
+    // `usage` and `modelUsage` are both cumulative over the run — they equal the sum over *distinct*
+    // assistant message ids in the transcript. Summing the transcript's lines instead multiplies
+    // that, because the CLI repeats a message's usage on every content block it writes.
+    const payload = {
+        usage: { input_tokens: 20841, output_tokens: 1355, cache_read_input_tokens: 20992, cache_creation_input_tokens: 0 },
+        modelUsage: {
+            'deepseek-chat': { inputTokens: 20841, outputTokens: 1355, cacheReadInputTokens: 20992, cacheCreationInputTokens: 0 },
+        },
+        total_cost_usd: 0.148576,
+    };
+    const totals = usageTotals(payload);
+    assert.strictEqual(totals.input, 20841);
+    assert.strictEqual(totals.cacheRead, 20992);
+    assert.deepStrictEqual(
+        totals.perModel.map((r) => r.model),
+        ['deepseek-chat'],
+        'the model that answered comes from modelUsage',
+    );
+    assert.strictEqual(
+        formatTokens(totals),
+        'tokens: in 20,841 · out 1,355 · cache write 0 · cache read 20,992',
+        'a zero column is printed, not dropped — a column that vanishes cannot be compared',
+    );
+    assert.deepStrictEqual(usageTotals({ usage: payload.usage }), { ...totals, perModel: [] }, 'usage alone still totals the same');
+    assert.strictEqual(usageTotals(undefined).input, 0, 'a result with no usage at all is zero, not a crash');
+
+    // the alias the run asked for and the model that answered are both named: one is what was
+    // typed, the other is what the tokens above were spent on
+    assert.strictEqual(describeModel(payload, {}, 'sonnet'), 'model: sonnet → deepseek-chat');
+    assert.strictEqual(
+        describeModel({}, { ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash' }, 'sonnet'),
+        'model: sonnet → deepseek-v4-flash',
+        'with no modelUsage the profile’s own mapping answers',
+    );
+    assert.strictEqual(describeModel({}, {}, 'some-literal-id'), 'model: some-literal-id', 'a literal id is not repeated twice');
+
+    // the CLI prices every provider against Anthropic's table, so its figure is only the truth on
+    // Anthropic itself. Anywhere else the number comes from the profile, or it is not claimed.
+    assert.match(formatCost('claude', totals, payload), /^cost: \$0\.1486 · Anthropic billing$/);
+    assert.match(formatCost('deepseek', totals, payload), /^cost: — · add "pricing"/, 'an unpriced provider says so');
+    assert.match(formatCost('deepseek', totals, payload), /the CLI's \$0\.1486 is Anthropic's table/, 'and why the CLI number is not it');
+
+    writeProfile('priced', {
+        env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic', ANTHROPIC_AUTH_TOKEN: 'sk-x' },
+        pricing: { 'deepseek-chat': { input: 0.28, output: 0.42, cache_read: 0.028 } },
+    });
+    // (20841·0.28 + 1355·0.42 + 20992·0.028) / 1e6
+    assert.strictEqual(formatCost('priced', totals, payload), 'cost: $0.00699 · "priced" profile pricing');
+    assert.match(
+        formatCost('priced', { ...totals, perModel: [{ model: 'other-model', input: 10, output: 10, cacheWrite: 0, cacheRead: 0 }] }, payload),
+        /no rate for other-model/,
+        'a model the pricing block never mentions is named rather than silently priced at zero',
+    );
+
+    // --- continuing a delegated run: the session store is what makes a cheap provider usable for
+    //     anything longer than one exchange
+    fs.writeFileSync(
+        path.join(runtime, 'agent-sessions.json'),
+        JSON.stringify({
+            'aaaaaaaa-1111-2222-3333-444444444444': { profile: 'deepseek', cwd: dir, model: 'sonnet', mode: 'read', at: new Date().toISOString() },
+        }),
+    );
+
+    out = await capture(() =>
+        handle({
+            jsonrpc: '2.0',
+            id: 9,
+            method: 'tools/call',
+            params: { name: 'run_agent', arguments: { session: 'aaaaaaaa-1111-2222-3333-444444444444', prompt: 'and now?', profile: 'claude' } },
+        }),
+    );
+    assert.ok(out[0].result.isError, 'a session cannot change providers mid-conversation');
+    assert.match(out[0].result.content[0].text, /belongs to the "deepseek" profile/, 'and the run it belongs to is named');
+
+    out = await capture(() =>
+        handle({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'run_agent', arguments: { session: 'not-a-session', prompt: 'hi' } } }),
+    );
+    assert.match(out[0].result.content[0].text, /is not a session id/, 'a session id is checked before anything is spawned');
+
+    out = await capture(() =>
+        handle({
+            jsonrpc: '2.0',
+            id: 11,
+            method: 'tools/call',
+            params: { name: 'run_agent', arguments: { session: 'bbbbbbbb-1111-2222-3333-444444444444', prompt: 'hi' } },
+        }),
+    );
+    assert.match(out[0].result.content[0].text, /profile is required/, 'an unknown session cannot supply a provider');
+
+    // --- background: the call returns a task id at once instead of holding the turn for 15 minutes
+    //
+    // The CLI path is deliberately bogus, so the run fails the moment it is spawned: what is under
+    // test is the task's lifecycle, not the child's answer.
+    process.env.CLAUDAPTER_CLAUDE_BIN = path.join(dir, 'no-such-claude-binary');
+    const started = await callTool('run_agent', { profile: 'claude', prompt: 'count the files', background: true });
+    assert.match(started, /^task_1 started/, 'a task id comes back immediately');
+    assert.match(started, /check_agent\(\{ task: "task_1" \}\)/, 'and says how to collect it');
+    assert.match(started, /cannot interrupt the session/, 'and is honest that nothing will arrive on its own');
+
+    assert.match(await callTool('check_agent', {}), /^task_1 · claude · read · /, 'a listing shows every task and its state');
+
+    // wait_ms blocks until it settles rather than making the caller poll
+    await assert.rejects(
+        () => callTool('check_agent', { task: 'task_1', wait_ms: 10000 }),
+        /could not start the CLI/,
+        'a failed background run surfaces its own error when collected',
+    );
+    assert.match(await callTool('check_agent', {}), /task_1 · claude · read · failed /, 'and the listing remembers the failure');
+    assert.match(await callTool('stop_agent', { task: 'task_1' }), /had already finished \(failed\)/);
+    await assert.rejects(() => callTool('check_agent', { task: 'task_99' }), /unknown task "task_99"/);
+    delete process.env.CLAUDAPTER_CLAUDE_BIN;
 
     // --- the depth guard stops an agent chain from spawning itself forever
     process.env.CLAUDAPTER_AGENT_DEPTH = '2';

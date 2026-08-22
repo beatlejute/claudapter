@@ -203,20 +203,64 @@ npm run mcp:remove     # unregister
 
 Then, in any tab: *"ask deepseek to review this file"* — Claude calls `run_agent` with `profile: "deepseek"`, and the run goes out on DeepSeek's endpoint and key while the tab stays where it was.
 
-Two tools are exposed:
+Four tools are exposed:
 
-- **`list_profiles`** — every profile, its endpoint, and the model each family alias maps to.
-- **`run_agent`** — `profile` and `prompt` are required; `agent`, `model`, `effort`, `mode`, `cwd` and `timeout_ms` are optional.
+- **`list_profiles`** — every profile, its endpoint, the model each family alias maps to, and how that provider answered the last time it was called. `probe: true` refreshes all of them with a one-token call first.
+- **`run_agent`** — only `prompt` is required; `profile`, `session`, `agent`, `model`, `effort`, `mode`, `background`, `cwd` and `timeout_ms` are optional.
+- **`check_agent`** — collect a `background: true` run: `task` names it, `wait_ms` blocks until it finishes, and no argument at all lists every task of the session.
+- **`stop_agent`** — kill a background run before its timeout.
 
 Notes worth knowing before relying on it:
 
-- **The delegated agent shares no context** with the calling session — the prompt has to carry every fact it needs. It reads files itself, so paths are usually enough.
-- **`mode` defaults to `read`** (Read, Grep, Glob, WebFetch, WebSearch). `write` auto-accepts file edits, `full` bypasses permission checks — the provider on the other end is not the one you are watching, so the default stays read-only.
-- **`model` defaults to the `sonnet` alias**, which each profile maps through its own `ANTHROPIC_DEFAULT_SONNET_MODEL`. A literal id is sent to the provider untouched.
+- **A new agent shares no context** with the calling session — the prompt has to carry every fact it needs. It reads files itself, so paths are usually enough.
+- **A run can be continued.** Every result ends with its `session:` id; passing it back as `session` resumes that same agent with everything it already knows, so a cheap provider is not limited to one-shot questions. The profile, directory, mode and model of the original run are reused unless overridden, and a session cannot change providers — replaying one provider's history to another is never what "carry on" meant.
+- **`mode` defaults to `read`** (Read, Grep, Glob, WebFetch, WebSearch — no shell at all). `exec` adds a fixed allowlist of read-only and aggregating shell commands: `git log/show/diff/blame/rev-list`, `find`, `grep`, `wc`, `sort`, `awk`, `sed`, `jq`, `python -c`, `node -e`. Choose it for anything that has to count, group or cross-reference — a collection task with no shell does not run slower, it fails. `write` adds auto-accepted edits, `full` bypasses every permission check.
+  - `exec` is a convention, not a sandbox. Nothing outside the list runs — an `rm -rf` is denied — but an interpreter that *is* on the list can still write if the agent asks it to. It exists to make reading tasks possible, not to contain a hostile agent.
+  - A `PreToolUse` hook that rewrites commands (`git log` → `rtk git log`) would otherwise have every one of them denied, because the allowlist matches what the model wrote and the check reads what the hook produced. Each command is allowed under its wrappers too; `CLAUDAPTER_EXEC_WRAPPERS` sets them (default `rtk`, empty string to switch it off).
+- **`background: true` returns a task id instead of the answer**, so a fifteen-minute run does not hold the turn. The profile and its quota are still checked before it returns, so a hopeless call still fails immediately. Nothing arrives on its own when it completes — an MCP server cannot interrupt the session the way a subagent can — so the result has to be collected with `check_agent`. Tasks live only as long as the session that started them.
+- **`model` defaults to the `sonnet` alias**, which each profile maps through its own `ANTHROPIC_DEFAULT_SONNET_MODEL`. A literal id is sent to the provider untouched. The report names both the alias asked for and the model that answered.
 - **Credentials never cross.** The calling session's `ANTHROPIC_*` variables are stripped before the profile's own are applied — including for the subscription profile, whose empty `env` would otherwise inherit whatever the caller was using.
 - **Delegation depth is capped at 2**, so an agent can delegate once and no further.
 - **A refusing provider is reported, not waited out.** An exhausted balance or a spent quota comes back as `429`, which the CLI treats as retryable and backs off on until the timeout kills the task — fifteen minutes to learn nothing. One `max_tokens: 1` call goes out first, and a refusal is returned in the provider's own words in about a second (*"Insufficient balance. Please recharge."*, *"Your token-plan 1-week quota has been exhausted"*). A probe that times out or cannot connect never blocks the run — it proves nothing the real attempt will not find out itself. Set `CLAUDAPTER_SKIP_PREFLIGHT=1` to turn it off.
-- The run is recorded in `bindings.json`, so it carries its provider's icon in the session history like any tab.
+- **What the provider said last is remembered**, in `agent-health.json`, and shown under its profile in `list_profiles` — including when the refusal lifts, dug out of a `resets_at`, a `retry-after`, or the sentence itself:
+
+  ```
+  codex — local adapter (codex) — opus=gpt-5.6-terra, sonnet=gpt-5.6-luna
+      FAILED 1s ago · HTTP 429 · The usage limit has been reached · resets 2026-08-27 10:22Z (in 5d 5h)
+  deepseek — api.deepseek.com — opus=deepseek-v4-pro, sonnet=deepseek-v4-flash
+      ok 2s ago
+  ```
+
+- The run is recorded in `bindings.json`, so it carries its provider's icon in the session history like any tab, and in `agent-sessions.json`, which is what makes it resumable.
+
+### What a run cost
+
+Every result ends with the same block, in the same order, for every profile — the point being that two runs on two providers can be compared without opening either transcript:
+
+```
+profile: deepseek · model: haiku → deepseek-chat · mode: exec · turns: 3 · 12s
+tokens: in 21,255 · out 576 · cache write 0 · cache read 42,368
+cost: — · add "pricing" to ~/.claude/profiles/deepseek.json to price this run
+session: 66e2dce7-… · continue it with run_agent({ session: "66e2dce7-…", prompt: … })
+```
+
+A zero column is printed rather than dropped: a column that disappears is a column that cannot be compared.
+
+**The token counts are whole-run totals** taken from the CLI's own `modelUsage`. Summing the transcript instead gives a multiple of the truth — the CLI writes one line per content block and repeats the full message usage on each, so a run whose assistant messages carry text plus a tool call appears to have cost twice what it did. The figure to trust is the one printed here; it equals the sum over *distinct* assistant message ids in the transcript, which is the same fact counted once.
+
+**The money is only claimed where it is known.** The CLI's `total_cost_usd` prices every run against Anthropic's table — its result even carries `provider: "firstParty"` for a DeepSeek call — so off Anthropic it is wrong by roughly an order of magnitude. On an Anthropic profile it is reported as-is; anywhere else the rate has to come from the profile, in USD per million tokens:
+
+```json
+{
+    "env": { "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic", "...": "..." },
+    "pricing": {
+        "deepseek-chat": { "input": 0.28, "output": 0.42, "cache_read": 0.028 },
+        "*": { "input": 0.28, "output": 0.42, "cache_read": 0.028 }
+    }
+}
+```
+
+`"*"` covers every model the block does not name; `cache_write` falls back to `input`. Only claudapter reads this key — the CLI never sees it. Without it the line says so, rather than printing a number that is not the truth.
 
 ## How it works
 
