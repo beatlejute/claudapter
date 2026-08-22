@@ -56,13 +56,21 @@ const PATCHES = [
         // structural and hands the session over as well. Anchoring on the three reads that precede the
         // registration (`modelSelection`, `claudeConfig`, `lastServedModel`) is what pins the capture to the
         // session rather than to whatever else the minifier happens to call `t`, and the back-references keep
-        // all three on the same object. One match in 2.1.227–2.1.233, always `session=t, ctx=n`.
+        // all three on the same object. One match in 2.1.227–2.1.239, always `session=t, ctx=n`.
+        //
+        // Two things here were name-shaped rather than structural until 2.1.239. The helper calls were
+        // `\w+`, and 2.1.239 renamed the claudeConfig one to `$b` — `\w` does not match `$`, so the whole
+        // signature dropped to zero hits, the same trap points #6–#8 already document. And the jsx factory
+        // was written into the replacement as a literal `b`; it has been `b` in every release seen so far,
+        // but a rename would have produced a ReferenceError at render time rather than a patch-time error.
+        // It is now captured off the `trailingComponent:` expression that follows, three literal strings
+        // deep into the same registration, which is as stable an anchor as this file has.
         file: 'webview/index.js',
-        find: /let (\w+)=(\w+)\.modelSelection\.value,(\w+)=\w+\(\2\.claudeConfig\.value\),(\w+)=\w+\(\1,\2\.lastServedModel\.value,\3\);(\w+)\.commandRegistry\.registerAction\(\{id:"model"/,
-        replace: (found, _sel, session, _cfg, _label, ctx) =>
+        find: /let ([\w$]+)=([\w$]+)\.modelSelection\.value,([\w$]+)=[\w$]+\(\2\.claudeConfig\.value\),([\w$]+)=[\w$]+\(\1,\2\.lastServedModel\.value,\3\);([\w$]+)\.commandRegistry\.registerAction\(\{id:"model",label:"Switch model…",description:"Change the AI model",trailingComponent:\4\?([\w$]+)\("span"/,
+        replace: (found, _sel, session, _cfg, _label, ctx, jsx) =>
             found.replace(
                 `${ctx}.commandRegistry.registerAction({id:"model"`,
-                `(globalThis.__ccx&&globalThis.__ccx.onRegistry&&globalThis.__ccx.onRegistry(${ctx},b,${session})),` +
+                `(globalThis.__ccx&&globalThis.__ccx.onRegistry&&globalThis.__ccx.onRegistry(${ctx},${jsx},${session})),` +
                     `${ctx}.commandRegistry.registerAction({id:"model"`,
             ),
         where: 'replace',

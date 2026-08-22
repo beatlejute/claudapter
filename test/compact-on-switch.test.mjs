@@ -211,8 +211,12 @@ completeRestart('ch2');
 //    offer just never appears.
 const patcher = readFileSync(new URL('../scripts/apply-patch.mjs', import.meta.url), 'utf8');
 assert.ok(
-    /onRegistry\(\$\{ctx\},b,\$\{session\}\)/.test(patcher),
+    /onRegistry\(\$\{ctx\},\$\{jsx\},\$\{session\}\)/.test(patcher),
     'injection point #4 must pass the session as onRegistry\'s third argument',
+);
+assert.ok(
+    !/onRegistry\([^)]*,b,/.test(patcher),
+    'the jsx factory must be captured, not written in as a literal `b`',
 );
 const page = readFileSync(new URL('../src/webview.js', import.meta.url), 'utf8');
 assert.ok(
