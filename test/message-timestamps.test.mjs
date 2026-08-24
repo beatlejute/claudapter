@@ -266,5 +266,18 @@ transcriptNodes[0].appendChild(Object.assign(new El('span'), { className: 'ccx-m
 fromHost({ type: 'ccx:state', profiles: [], active: null, sessionId: 'sess-times' });
 assert.equal(labelOf(transcriptNodes[0], 'ccx-msg-time'), null, 'a stale label must be removed, not left behind');
 
+// 9c. The gutter that makes room for the time must be carved out of the bubble's existing width, not
+//     added to it. A user bubble is a shrink-to-fit inline-block (width:100% in sticky mode) holding a
+//     max-width:100% box, so with default content-box sizing the padding widened the whole container and
+//     the right edge of every user message ran off the panel. Layout again is invisible to a DOM test.
+const gutterAt = page.indexOf("'[data-ccx-time]{");
+assert.ok(gutterAt >= 0, 'the gutter rule must still exist');
+const gutter = page.slice(gutterAt, page.indexOf('}', gutterAt));
+assert.ok(
+    gutter.includes('box-sizing:border-box'),
+    'the gutter must not add to the bubble width — the user message overflows right',
+);
+assert.ok(gutter.includes('max-width:100%'), 'the padded box must stay capped at the width available to it');
+
 console.log('\nOK — transcript messages get chat-style timestamps and date separators');
 process.exit(0);

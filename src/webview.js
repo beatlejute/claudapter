@@ -2065,7 +2065,11 @@
         // vertical rail (top:18px first in a run, height:18px last, display:none when alone). Writing
         // to either replaces it, which stretched the rail and then lost it. The labels are real child
         // nodes instead, and every stock rule about the rail keeps applying untouched.
-        '[data-ccx-time]{padding-left:84px}',
+        // border-box, so the 84px gutter is carved out of the width the bubble already had instead of
+        // being added to it. A user bubble is a shrink-to-fit inline-block (and width:100% in sticky
+        // mode) whose inner box is max-width:100%: with content-box sizing the padding grows the whole
+        // container past the panel, which pushed the right edge of every user message off screen.
+        '[data-ccx-time]{box-sizing:border-box;max-width:100%;padding-left:84px}',
         // Absolute labels keep the stock message layout and timeline untouched. A date-bearing bubble
         // reserves a small header inside itself, so the separator never floats over the previous bubble.
         '.ccx-msg-time{position:absolute;left:24px;top:8px;width:52px;height:1.5em;display:flex;align-items:center;white-space:nowrap;font-size:11px;line-height:1;opacity:.55;font-variant-numeric:tabular-nums;user-select:none;pointer-events:none}',
