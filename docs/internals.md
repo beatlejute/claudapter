@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.239**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, so the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.241**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -58,7 +58,7 @@ Every identifier there is a minified local, and the minifier reshuffles them rel
 | 2.1.228 | `f.env=v;` | `;` |
 | 2.1.229 | `f.env=v;` | `;` |
 | 2.1.231–2.1.235 | `f.env=v;` | `;` |
-| 2.1.238–2.1.239 | `h.env=y;` | `;` |
+| 2.1.238–2.1.241 | `h.env=y;` | `;` |
 
 2.1.227 is the one that changed the **shape**, not just the names. Up to 2.1.226 the three assignments were the condition of an `if`, with the node path as the last operand of the comma expression:
 
@@ -223,7 +223,7 @@ session too:
 
 The three reads in front are what pin the capture to the session rather than to whatever else the
 minifier happens to call `t`, and the back-references keep all three on one object. One match in
-2.1.227–2.1.239, always `session=t, ctx=n`.
+2.1.227–2.1.241, always `session=t, ctx=n`.
 
 Two halves of it stayed name-shaped for six releases, and 2.1.239 collected on both. The helper
 calls were spelled `\w+`, and 2.1.239 renamed the `claudeConfig` one to `$b` — so the signature fell to

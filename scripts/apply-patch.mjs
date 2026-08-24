@@ -56,7 +56,7 @@ const PATCHES = [
         // structural and hands the session over as well. Anchoring on the three reads that precede the
         // registration (`modelSelection`, `claudeConfig`, `lastServedModel`) is what pins the capture to the
         // session rather than to whatever else the minifier happens to call `t`, and the back-references keep
-        // all three on the same object. One match in 2.1.227–2.1.239, always `session=t, ctx=n`.
+        // all three on the same object. One match in 2.1.227–2.1.241, always `session=t, ctx=n`.
         //
         // Two things here were name-shaped rather than structural until 2.1.239. The helper calls were
         // `\w+`, and 2.1.239 renamed the claudeConfig one to `$b` — `\w` does not match `$`, so the whole
