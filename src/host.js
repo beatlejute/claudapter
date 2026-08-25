@@ -541,6 +541,7 @@ function agentRunsPayload() {
         tailTranscript(run.session, state);
         return {
             session: run.session,
+            parent: typeof run.parent === 'string' ? run.parent : null,
             profile: run.profile || null,
             model: run.model || null,
             mode: run.mode || null,

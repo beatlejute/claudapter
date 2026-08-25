@@ -54,6 +54,11 @@ const DEFAULT_MODEL = 'sonnet';
 // an unbounded chain of them is a fork bomb with an API bill.
 const DEPTH_VAR = 'CLAUDAPTER_AGENT_DEPTH';
 const MAX_DEPTH = 2;
+// A delegate that delegates again is the one case where the work is not where the tab is looking:
+// the run the tab started sits there dispatching while its own child does everything. The child's
+// server learns whose child it is from the environment its parent was spawned with — there is no
+// other channel, since the two are separate processes that never speak.
+const PARENT_VAR = 'CLAUDAPTER_PARENT_RUN';
 
 // A manifest outlives its run only long enough for the frame to show the final line. Both bounds
 // are swept on every write, so a machine that never runs another agent still ends up clean.
@@ -639,6 +644,7 @@ function openRun(ctx) {
     sweepRuns();
     writeRun(id, {
         session: id,
+        parent: process.env[PARENT_VAR] || null,
         profile: ctx.profile,
         model: ctx.model,
         mode: ctx.mode,
@@ -874,6 +880,9 @@ async function prepare(params) {
     // resumed run already has one — passing --session-id alongside --resume would be two answers to
     // the same question.
     const liveSession = session || randomUUID();
+    // Inherited by everything the delegate spawns, its own copy of this server included, which is
+    // what lets a nested run name the run it belongs to.
+    env[PARENT_VAR] = liveSession;
 
     const args = ['-p', '--output-format', 'json', '--model', model, ...MODES[mode]];
     if (params.effort) args.push('--effort', String(params.effort));

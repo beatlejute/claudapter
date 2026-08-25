@@ -1069,7 +1069,9 @@
         var best = null;
         for (var i = 0; i < agentRuns.length; i++) {
             var run = agentRuns[i];
-            if (claimedRuns[run.session]) continue;
+            // A run with a parent was started by another agent, not by this tab: it belongs inside
+            // its parent's frame and must never be adopted by a block of its own.
+            if (run.parent || claimedRuns[run.session]) continue;
             var a = run.prompt || '';
             var b = prompt;
             var n = Math.min(a.length, b.length);
@@ -1088,7 +1090,28 @@
         return m + 'm ' + (s % 60) + 's';
     }
 
+    // A run the tab started can itself delegate, and then it spends the whole time dispatching while
+    // its child does the work — the frame would truthfully show almost nothing. So a child's lines are
+    // folded into its parent's frame, under a header of their own, and the parent's own note counts
+    // the whole tree rather than just its own two tool calls.
+    function withChildren(run, depth) {
+        var events = (run.events || []).slice();
+        if (depth >= 2) return events;
+        for (var i = 0; i < agentRuns.length; i++) {
+            var child = agentRuns[i];
+            if (!child.parent || child.parent !== run.session) continue;
+            claimedRuns[child.session] = true;
+            events.push({ k: 'child', run: child });
+            events = events.concat(withChildren(child, depth + 1));
+        }
+        return events;
+    }
+
     function eventLine(e) {
+        if (e.k === 'child') {
+            var meta = runMeta(e.run);
+            return { cls: 'ccx-agent-child', text: meta.title + ' — ' + meta.note };
+        }
         if (e.k === 'tool') return { cls: 'ccx-agent-tool', text: e.t ? e.n + ' ' + e.t : e.n };
         if (e.k === 'thinking') return { cls: 'ccx-agent-thinking', text: 'thinking' };
         if (e.k === 'result') return null;
@@ -1141,7 +1164,7 @@
         }
         // Rebuilt only when the tail actually changed: this runs on every observer pass, and rewriting
         // the body each time would fight the user's own scrolling inside it.
-        var stamp = String(events.length) + '|' + (events.length ? JSON.stringify(events[events.length - 1]) : '');
+        var stamp = meta.note + '|' + String(events.length) + '|' + (events.length ? JSON.stringify(events[events.length - 1]) : '');
         if (body.dataset.ccxStamp === stamp) return;
         body.dataset.ccxStamp = stamp;
         var atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
@@ -1200,15 +1223,36 @@
         };
     }
 
-    function runMeta(run) {
+    function runMeta(run, tree) {
         var running = run.state === 'running';
         var elapsed = span((running ? Date.now() : run.finishedAt || Date.now()) - (run.startedAt || 0));
+        var tools = 0;
+        if (tree) for (var i = 0; i < tree.length; i++) if (tree[i].k === 'tool') tools++;
         return {
             running: running,
             state: run.state,
             title: (run.profile || 'agent') + (run.model ? ' · ' + run.model : ''),
-            note: [running ? 'running' : run.state, elapsed, run.tokens || '', (run.error || '').slice(0, 80)].filter(Boolean).join(' · '),
+            note: [running ? 'running' : run.state, elapsed, tools ? tools + ' tool calls' : '', run.tokens || '', (run.error || '').slice(0, 80)]
+                .filter(Boolean)
+                .join(' · '),
         };
+    }
+
+    // The host posts only when a run's tail actually changes, which is right for the body and wrong
+    // for the clock: an agent that thinks for a minute without writing anything would leave the frame
+    // reading the same elapsed time, which is indistinguishable from a frame that has died. So a
+    // running frame repaints itself once a second regardless of what the host has to say.
+    function watchRunningFrames() {
+        // Guarded rather than assumed: the page is booted headless by the test harnesses, and a
+        // missing timer here would take the whole bootstrap — every other decoration with it — down.
+        if (typeof setInterval !== 'function') return;
+        setInterval(function () {
+            for (var i = 0; i < agentRuns.length; i++)
+                if (agentRuns[i].state === 'running') {
+                    decorateAgentFrames();
+                    return;
+                }
+        }, 1000);
     }
 
     function decorateAgentFrames() {
@@ -1244,7 +1288,8 @@
                         dropFrame(host);
                         continue;
                     }
-                    paintFrame(host, block.id, frameIsOpen(block.id, run.state === 'running'), runMeta(run), run.events || []);
+                    var tree = withChildren(run, 0);
+                    paintFrame(host, block.id, frameIsOpen(block.id, run.state === 'running'), runMeta(run, tree), tree);
                 } else {
                     dropFrame(host);
                 }
@@ -1270,6 +1315,7 @@
                 syncResumePrompt();
             }, 60);
         }).observe(document.body, { childList: true, subtree: true });
+        watchRunningFrames();
     }
 
     function toast(message) {
@@ -2420,6 +2466,10 @@
         // asked, the other is what it is saying back.
         '.ccx-agent-prompt{opacity:.5;white-space:pre-wrap;padding-left:8px;border-left:2px solid var(--vscode-widget-border, rgba(128,128,128,.35))}',
         '.ccx-agent-text{opacity:.9;white-space:pre-wrap}',
+        // A nested run gets a rule of its own rather than an indent: the lines under it are the work,
+        // and burying them a level deep is what made them hard to find in the first place.
+        '.ccx-agent-child{margin:4px 0 2px;padding:2px 0 2px 6px;border-left:2px solid var(--vscode-textLink-foreground, currentColor);opacity:.8;font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+        '.ccx-agent-child::before{content:"↳ ";font-style:normal;opacity:.7}',
         '.ccx-agent-idle{opacity:.45;font-style:italic}',
         '.ccx-model-effort{display:inline-flex;align-items:center;flex:0 0 auto;padding:0 8px;border-radius:8px;background:var(--vscode-badge-background, transparent);color:var(--vscode-descriptionForeground, var(--vscode-foreground));font:11px var(--vscode-font-family);line-height:18px;opacity:.9;pointer-events:none;user-select:none;white-space:nowrap}',
         // The row is display:flex;align-items:center;gap:8px, so ::before simply becomes its leading flex

@@ -264,6 +264,12 @@ The three kinds are filled from different places:
   one-line summary, and running token and tool-call totals. A summary, not a transcript — but still
   the difference between "working" and "stuck". The app throws the entry away the instant the task
   ends, so the last thing it reported is kept rather than blanked at the one moment worth reading.
+- **A run that a delegate started itself.** A delegated agent can delegate once more, and when it does
+  it spends its whole time dispatching while the child does the work — the frame over the tab's own
+  call would truthfully show almost nothing. So the child's lines are folded into the same frame under
+  a `↳ profile · model` rule of their own, and the header counts the whole tree. The child names its
+  parent in its own manifest: the id travels in `CLAUDAPTER_PARENT_RUN`, which the delegate's
+  environment carries down to its own copy of the MCP server, because the two processes never speak.
 - **A `run_agent` run** is a separate `claude -p` process, so the extension host follows it instead:
   the MCP server picks the session id *before* the spawn (`--session-id`) and drops a manifest in
   `~/.claude/claudapter/agent-runs/`, which is what makes the transcript the run is about to write
@@ -284,7 +290,10 @@ What it does not do:
   apart by which one is newer, which is the best that can be done from here.
 - **Update granularity is a turn, not a token.** A native frame follows the live stream, but a
   `run_agent` frame moves when the agent's transcript gets its next line — a second or so behind, not
-  character by character.
+  character by character. The elapsed clock in the header ticks on its own, so a frame that has said
+  nothing for a minute still reads as alive rather than as dead.
+- **Nesting stops at the delegation cap.** Delegation is capped at two levels, so a frame shows at
+  most the run it started and that run's own child.
 
 ### What a run cost
 

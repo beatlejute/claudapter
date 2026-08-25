@@ -209,6 +209,8 @@ const pageContext = {
     JSON,
     setTimeout: pageWindow.setTimeout,
     clearTimeout: pageWindow.clearTimeout,
+    setInterval: () => ({}),
+    clearInterval: () => {},
     navigator: { clipboard: { writeText: () => Promise.resolve() } },
     MutationObserver: class { observe() {} },
     Node: { DOCUMENT_POSITION_FOLLOWING: 4 },
@@ -401,6 +403,62 @@ fromHost({
     ],
 });
 assert.notDeepStrictEqual(linesOf(twinA), linesOf(twinB), 'two identical prompts must not be shown the same run');
+
+// --- 6. a delegate that delegates again ---------------------------------------------------------
+//
+// This is the case that made the frame look empty in practice: the run the tab started spends the
+// whole time dispatching, and everything worth watching happens one level down, in a run no block in
+// this tab ever called. The child names its parent in its own manifest, so it is folded in.
+const dispatcher = {
+    session: 'eeeeeeee-1111-2222-3333-444444444444',
+    parent: null,
+    profile: 'codex',
+    model: 'sonnet',
+    prompt: 'start the full run',
+    state: 'running',
+    startedAt: Date.now() - 60000,
+    events: [
+        { k: 'prompt', t: 'start the full run' },
+        { k: 'tool', n: 'mcp__claudapter-agents__run_agent', t: 'do the actual work' },
+    ],
+};
+const worker = {
+    session: 'ffffffff-1111-2222-3333-444444444444',
+    parent: 'eeeeeeee-1111-2222-3333-444444444444',
+    profile: 'codex',
+    model: 'sonnet',
+    prompt: 'do the actual work',
+    state: 'running',
+    startedAt: Date.now() - 55000,
+    events: [
+        { k: 'tool', n: 'Bash', t: 'node run-all.mjs' },
+        { k: 'text', t: 'scenario 3 of 12' },
+    ],
+};
+
+const dispatchNode = toolNode({ ...mcpBlock, id: 'toolu_mcp_nested', input: { prompt: 'start the full run' } }, false);
+toolNodes = [dispatchNode];
+fromHost({ type: 'ccx:agentRuns', runs: [dispatcher, worker] });
+assert.deepStrictEqual(
+    linesOf(dispatchNode),
+    [
+        'ccx-agent-prompt:start the full run',
+        'ccx-agent-tool:mcp__claudapter-agents__run_agent do the actual work',
+        // the child's own header stays plain: its lines follow immediately, so a count would only repeat them
+        'ccx-agent-child:codex · sonnet — running · 55s',
+        'ccx-agent-tool:Bash node run-all.mjs',
+        'ccx-agent-text:scenario 3 of 12',
+    ],
+    "a nested run's work is shown inside the frame of the call that led to it",
+);
+const treeNote = child(child(frameOf(dispatchNode), 'ccx-agent-head'), 'ccx-agent-note').textContent;
+assert.match(treeNote, /2 tool calls/, 'the parent counts the whole tree, not just its own dispatching');
+
+// The child must never be matched to a block of its own — nothing in this tab called it.
+const strayNode = toolNode({ ...mcpBlock, id: 'toolu_mcp_stray', input: { prompt: 'do the actual work' } }, false);
+toolNodes = [strayNode];
+fromHost({ type: 'ccx:agentRuns', runs: [worker] });
+assert.equal(frameOf(strayNode), null, 'a run with a parent is never adopted by a block of its own');
 
 // An ordinary tool call is never touched.
 const plain = toolNode({ type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: 'a.js' } }, true);
