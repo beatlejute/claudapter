@@ -1,7 +1,7 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.241**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.245**.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -41,7 +41,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.241**; the signatures also match 2.1.220–2.1.239)
+- The `anthropic.claude-code` extension installed (verified against **2.1.245**; the signatures also match 2.1.220–2.1.241)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
@@ -491,7 +491,7 @@ Keys "owned" by profiles are computed as the union of every `env` across `~/.cla
 
 VS Code installs the new version into a separate folder, so the patch is gone. Re-run `node scripts/install.mjs` and reload the window. If the signatures changed in the new bundle, the patcher stops with an explicit error naming the mismatch instead of corrupting anything.
 
-`scripts/apply-patch.mjs` warns when the installed extension version differs from the one in `package.json`, but it is only a warning — a signature that still matches is still applied. The minified locals are the fragile part, so most points match the *shape* of the code around them rather than the names; only #1 and #5 are anchored to string literals that survive minification unchanged.
+`scripts/apply-patch.mjs` warns when the installed extension version differs from the one in `package.json`, but it is only a warning — a signature that still matches is still applied. The minified locals are the fragile part, so most points match the *shape* of the code around them rather than the names; only #5 is anchored to a string literal that survives minification unchanged. #1 was too, until 2.1.245 renamed all three locals in it.
 
 ### Version branches
 
@@ -499,7 +499,8 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 
 | Branch | Extension | What the minifier called the locals |
 |---|---|---|
-| `main` | 2.1.241 — newest | `h.env=y;`, `light:s,dark:s` |
+| `main` | 2.1.245 — newest | `q.env=Z;`, `light:W,dark:W` |
+| `v2.1.245` | 2.1.245 | `q.env=Z;`, `light:W,dark:W` |
 | `v2.1.241` | 2.1.241 | `h.env=y;`, `light:s,dark:s` |
 | `v2.1.239` | 2.1.239 | `h.env=y;`, `light:s,dark:s` |
 | `v2.1.238` | 2.1.238 | `h.env=y;`, `light:s,dark:s` |
@@ -518,9 +519,9 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 | `v2.1.221` | 2.1.221 | `f.env=x,_)`, `light:a,dark:a` |
 | `v2.1.220` | 2.1.220 | `f.env=w,g)`, `light:a,dark:a` |
 
-One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. Both structural signatures are re-checked against every bundle still on disk at update time. VS Code garbage-collects retired extension folders, so the older ones eventually stop being verifiable locally — 2.1.220 through 2.1.226 were gone by the 2.1.228 update, and by 2.1.233 the sweep was 2.1.227 through 2.1.233 — at the 2.1.239 update only 2.1.235, 2.1.238 and 2.1.239 were still there, and 2.1.241 joined that set without retiring any of it. Their branches stay pinned to the commit that was verified against them.
+One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. Both structural signatures are re-checked against every bundle still on disk at update time. VS Code garbage-collects retired extension folders, so the older ones eventually stop being verifiable locally — 2.1.220 through 2.1.226 were gone by the 2.1.228 update, and by 2.1.233 the sweep was 2.1.227 through 2.1.233 — at the 2.1.239 update only 2.1.235, 2.1.238 and 2.1.239 were still there, 2.1.241 joined that set without retiring any of it, and the 2.1.245 update finally swept the rest — 2.1.241 and 2.1.245 are all that is left. Their branches stay pinned to the commit that was verified against them.
 
-Renames alone have never cost **these two** a signature change — but they have cost others, twice in a row. 2.1.238 renamed the session list's `useRef` alias (`ge` → `_e`), the one hook alias injection point #6 still hardcoded. 2.1.239 renamed a helper injection point #4 reads through to `$b` — and since that signature spelled its identifiers `\w+`, which does not match a `$`, it fell to zero hits on a name it was not even capturing. Both are fixed the same way, by capturing what was being spelled out. 2.1.227 is the other kind of break — it dropped the bundled-node fallback, which deleted the `if(…)` wrapper around #3 and left the assignment ending in `;` instead of `,<nodePath>)`. The signature now captures that terminator and echoes it back verbatim, so one pattern still covers every release in the table. 2.1.241 is the counter-example worth recording: all eight signatures matched it untouched, the first release since 2.1.234 to cost nothing at all.
+Renames have now cost almost every signature at least once, and 2.1.245 is where they reached the two that had held out longest. 2.1.238 renamed the session list's `useRef` alias (`ge` → `_e`), the one hook alias injection point #6 still hardcoded. 2.1.239 renamed a helper injection point #4 reads through to `$b` — and since that signature spelled its identifiers `\w+`, which does not match a `$`, it fell to zero hits on a name it was not even capturing. 2.1.245 carried that same `$` into `extension.js` for the first time and took #1 and #2 with it: #2 spelled its locals `\w+` while the panel had become `$`, and #1 was still a plain literal naming three locals outright — the nonce, the bundle's own script URI, and the webview parameter the injected call is handed. All of them are fixed the same way, by capturing what was being spelled out; #1 now anchors on `getHtmlForWebview`, the one unminified name within reach. 2.1.227 is the other kind of break — it dropped the bundled-node fallback, which deleted the `if(…)` wrapper around #3 and left the assignment ending in `;` instead of `,<nodePath>)`. The signature now captures that terminator and echoes it back verbatim, so one pattern still covers every release in the table. 2.1.241 is the counter-example worth recording: all eight signatures matched it untouched, the first release since 2.1.234 to cost nothing at all.
 
 When adapting to a new release: verify the signatures against it, bump `package.json`, this README and [docs/internals.md](docs/internals.md) on `main`, then tag the result with a fresh `v<version>` branch.
 

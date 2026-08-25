@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.241**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.245**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. 2.1.245 broke two more, for a reason with no precedent in this file: it is the first release to put `$`-prefixed names into `extension.js`, which cost #2 its `\w+` identifier classes and #1 its literal anchor outright (see "CSP and loading your own script"). So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -59,6 +59,7 @@ Every identifier there is a minified local, and the minifier reshuffles them rel
 | 2.1.229 | `f.env=v;` | `;` |
 | 2.1.231–2.1.235 | `f.env=v;` | `;` |
 | 2.1.238–2.1.241 | `h.env=y;` | `;` |
+| 2.1.245 | `q.env=Z;` | `;` |
 
 2.1.227 is the one that changed the **shape**, not just the names. Up to 2.1.226 the three assignments were the condition of an `if`, with the node path as the last operand of the comma expression:
 
@@ -491,6 +492,15 @@ language the *model* answers in.
 ### CSP and loading your own script
 
 `getHtmlForWebview` (line 140039) emits `script-src 'nonce-…'` (line 140070), and `localResourceRoots` is limited to the `webview/` and `resources/` directories inside the extension. An external file cannot be referenced by URI — hence the custom code is inlined into the HTML with their nonce, while the text itself is read from disk when the page is generated (so edits apply without re-patching).
+
+Injection point #1 sits on that `<script … type="module">` tag, and until 2.1.245 it was a plain literal
+naming three locals outright: `<script nonce="${u}" src="${a}" type="module"></script>`. 2.1.245 renamed
+all three — the nonce `u` → `U`, the bundle's own script URI `a` → `G`, and the webview parameter `e` → `$`,
+which is the one the injected call is handed. So the anchor now starts at `getHtmlForWebview` — the only
+unminified name in reach — and runs to that tag through a lazy gap. The parameter and the nonce come out
+of the match, and the whole span is re-emitted with the host's `<script>` in front of the tag. There are
+four `getHtmlForWebview(` occurrences in the bundle, but only the definition is followed by `{`, so the
+count check still sees exactly one match.
 
 Execution order: their inline flag script → our classic script → their bundle (`type="module"`, deferred). That lets our code call `acquireVsCodeApi()` first and replace the global with a proxy that sees every outgoing message. Unknown types are ignored by the UI — its listener only reacts to `type === "from-extension"`.
 

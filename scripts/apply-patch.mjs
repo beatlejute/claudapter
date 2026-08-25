@@ -10,18 +10,37 @@ const HOST_REQUIRE =
 
 const PATCHES = [
     {
+        // Was a plain literal until 2.1.245, which renamed every local in it: the nonce (`u` → `U`), the
+        // bundle's own script URI (`a` → `G`) and — the one that actually matters — the webview parameter
+        // the injected call is handed (`e` → `$`). That release is also where `$`-prefixed names reached
+        // extension.js at all, which is why `\w+` alone is no longer enough anywhere in this file.
+        //
+        // `getHtmlForWebview` is the one real name within reach, so the anchor starts there and runs to
+        // the module <script> tag. The parameter and the nonce come out of the match; the whole span is
+        // then re-emitted with the host's own <script> in front of that tag. The gap is lazy and the tag
+        // is unique, so the four `getHtmlForWebview(` occurrences still yield exactly one match — the
+        // definition, not a call site, since only the definition is followed by `{`.
         file: 'extension.js',
-        find: '        <script nonce="${u}" src="${a}" type="module"></script>',
-        insert:
-            '        ${(()=>{try{' + HOST_REQUIRE + 'return require(__p).renderScript(e,u)}catch(__e){return ""}})()}\n',
-        where: 'before',
+        find: /getHtmlForWebview\(([\w$]+)[^)]*\)\{[\s\S]*?<script nonce="\$\{([\w$]+)\}" src="\$\{[\w$]+\}" type="module"><\/script>/,
+        replace: (found, webview, nonce) => {
+            const tag = '<script nonce="${' + nonce + '}" src=';
+            return found.replace(
+                tag,
+                () =>
+                    '${(()=>{try{' +
+                    HOST_REQUIRE +
+                    `return require(__p).renderScript(${webview},${nonce})}catch(__e){return ""}})()}\n        ` +
+                    tag,
+            );
+        },
+        where: 'replace',
     },
     {
         // Same story as #3: the icon local is renamed too (2.1.220–2.1.224 `light:a,dark:a`, 2.1.226 `light:s,dark:s`).
         // Anchoring on the shape — and on the `.webview.options=` that always follows — keeps the panel variable
         // available for the call, which is the one name the injected code actually needs.
         file: 'extension.js',
-        find: /(\w+)\.iconPath=\{light:(\w+),dark:\2\},(\1\.webview\.options=)/,
+        find: /([\w$]+)\.iconPath=\{light:([\w$]+),dark:\2\},(\1\.webview\.options=)/,
         replace: (_found, panel, icon, tail) =>
             `${panel}.iconPath={light:${icon},dark:${icon}},(()=>{try{` +
             HOST_REQUIRE +
@@ -38,11 +57,15 @@ const PATCHES = [
         // with it. So the terminator is captured whole and re-emitted verbatim — `,<nodePath>)` on 2.1.220–2.1.226
         // keeps the enclosing `if(` arity intact, `;` on 2.1.227+ closes the bare statement.
         //
+        // 2.1.245 put `$`-prefixed names into extension.js for the first time, so every class here is
+        // `[w$]+` rather than `w+` — the same widening points #4 and #6–#8 already needed in the webview
+        // bundle. It has not bitten this signature yet (2.1.245 is `q.env=Z;`), but it broke #1 and #2.
+        //
         // The resume id is read off the options object (`resume:t`) instead of the parameter, which is renamed too.
         // The object itself goes along as the third argument: envFor clears its `resume` when no transcript exists
         // for that id, and the SDK builds `--resume=<id>` from that field after this expression has run.
         file: 'extension.js',
-        find: /(\w+)\.pathToClaudeCodeExecutable=(\w+),\1\.executableArgs=(\w+),\1\.env=(\w+)(,\w+\)|;)/,
+        find: /([\w$]+)\.pathToClaudeCodeExecutable=([\w$]+),\1\.executableArgs=([\w$]+),\1\.env=([\w$]+)(,[\w$]+\)|;)/,
         replace: (_found, opts, bin, args, env, tail) =>
             `${opts}.pathToClaudeCodeExecutable=${bin},${opts}.executableArgs=${args},${opts}.env=(()=>{try{` +
             HOST_REQUIRE +
