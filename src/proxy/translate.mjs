@@ -165,6 +165,20 @@ function parseArgs(raw) {
     }
 }
 
+// `prompt_tokens` already includes whatever the prefix cache served; Anthropic reports the cached
+// part beside the input rather than inside it, and every reader downstream sums the two. Split it
+// out so a cache hit shows as one, instead of being billed a second time at the uncached rate.
+function usageToAnthropic(usage = {}, previous = {}) {
+    const total = Number(usage.prompt_tokens ?? previous.input_tokens) || 0;
+    const cached = Number(usage.prompt_tokens_details?.cached_tokens) || 0;
+    return {
+        input_tokens: Math.max(0, total - cached),
+        output_tokens: Number(usage.completion_tokens ?? previous.output_tokens) || 0,
+        cache_read_input_tokens: cached,
+        cache_creation_input_tokens: 0,
+    };
+}
+
 function openAIToAnthropic(completion, fallbackModel) {
     const choice = (completion.choices || [])[0] || {};
     const message = choice.message || {};
@@ -188,10 +202,7 @@ function openAIToAnthropic(completion, fallbackModel) {
         content,
         stop_reason: stopReasonFor(choice.finish_reason),
         stop_sequence: null,
-        usage: {
-            input_tokens: usage.prompt_tokens ?? 0,
-            output_tokens: usage.completion_tokens ?? 0,
-        },
+        usage: usageToAnthropic(usage),
     };
 }
 
@@ -203,7 +214,7 @@ function createStreamTranslator(model) {
     let textIndex = null;
     const toolBlocks = new Map(); // openai tool_call index -> {anthropicIndex, sentStart}
     let finishReason = null;
-    let usage = { input_tokens: 0, output_tokens: 0 };
+    let usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
     let messageId = `msg_${Date.now()}`;
 
     const events = [];
@@ -245,11 +256,7 @@ function createStreamTranslator(model) {
     return {
         chunk(raw) {
             start(raw);
-            if (raw.usage)
-                usage = {
-                    input_tokens: raw.usage.prompt_tokens ?? usage.input_tokens,
-                    output_tokens: raw.usage.completion_tokens ?? usage.output_tokens,
-                };
+            if (raw.usage) usage = usageToAnthropic(raw.usage, usage);
 
             const choice = (raw.choices || [])[0];
             if (choice) {
@@ -312,7 +319,7 @@ function createStreamTranslator(model) {
             push('message_delta', {
                 type: 'message_delta',
                 delta: { stop_reason: stopReasonFor(finishReason), stop_sequence: null },
-                usage: { output_tokens: usage.output_tokens },
+                usage: { ...usage },
             });
             push('message_stop', { type: 'message_stop' });
             return drain();

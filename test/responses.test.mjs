@@ -87,6 +87,21 @@ const REASONING_EVENTS = [
     ],
 ];
 
+// The same run, answered off the prefix cache: the hit is counted *inside* input_tokens here
+const CACHED_EVENTS = [
+    ...EVENTS.slice(0, -1),
+    [
+        'response.completed',
+        {
+            type: 'response.completed',
+            response: {
+                ...EVENTS.at(-1)[1].response,
+                usage: { input_tokens: 210, output_tokens: 44, input_tokens_details: { cached_tokens: 180 } },
+            },
+        },
+    ],
+];
+
 // The connection simply ends: no failure to report, no terminal event either
 const TRUNCATED_EVENTS = [EVENTS[0], EVENTS[1]];
 
@@ -95,6 +110,7 @@ const SCRIPTS = {
     fail: FAIL_EVENTS,
     'fail-immediate': FAIL_EVENTS.slice(1),
     reasoning: REASONING_EVENTS,
+    cached: CACHED_EVENTS,
     truncated: TRUNCATED_EVENTS,
 };
 
@@ -218,6 +234,11 @@ async function main() {
     assert.strictEqual(sent.tools[0].type, 'function', 'tools are flat (Responses shape)');
     assert.strictEqual(sent.tools[0].name, 'Read', 'tool name at top level');
     assert.deepStrictEqual(sent.include, ['reasoning.encrypted_content'], 'encrypted reasoning requested back');
+    assert.match(
+        sent.prompt_cache_key,
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/,
+        'the request names a prompt cache key: the conversation id, so the turns of one session share a cache'
+    );
 
     // --- the harness prompt is restated next to the live turn.
     // First position is the far end of a growing input; by turn twenty everything after it outweighs
@@ -254,6 +275,7 @@ async function main() {
     assert.strictEqual(message.content[0].text, 'done', 'text parsed');
     assert.deepStrictEqual(message.content[1].input, { cmd: 'ls' }, 'arguments parsed');
     assert.strictEqual(message.stop_reason, 'tool_use', 'stop_reason with tool_use present');
+    assert.strictEqual(message.usage.cache_read_input_tokens, 0, 'no cache hit reported when there was none');
 
     // --- a non-streaming caller gets one JSON message, not SSE.
     // Claude Code's auto-mode permission classifier asks this way; served with text/event-stream
@@ -295,6 +317,22 @@ async function main() {
         'gpt-5.5'
     );
     assert.strictEqual(truncated.stop_reason, 'max_tokens', 'max_output_tokens -> max_tokens');
+
+    // --- a cache hit is reported as one instead of being folded into the input count.
+    // Caching here is implicit and a hit arrives inside `input_tokens`; Anthropic counts it beside
+    // the input, and everything downstream sums the two — the CLI's context meter, claudapter's own
+    // cost line. Left folded in, a hit is invisible and is charged again at the uncached rate.
+    mode = 'cached';
+    const hit = await fetch(`${base}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-test' },
+        body: JSON.stringify(request),
+    });
+    const hitDelta = parseSse(await hit.text()).find((e) => e.event === 'message_delta');
+    assert.strictEqual(hitDelta.data.usage.cache_read_input_tokens, 180, 'the cached prefix is reported');
+    assert.strictEqual(hitDelta.data.usage.input_tokens, 30, 'and subtracted from the input that counted it');
+    assert.strictEqual(hitDelta.data.usage.output_tokens, 44, 'output is untouched');
+    mode = 'ok';
 
     // --- 6a. failure BEFORE the first event: a real HTTP status instead of "200 with an empty body"
     mode = 'fail-immediate';
@@ -357,7 +395,7 @@ async function main() {
         headers: { 'content-type': 'application/json', 'x-api-key': 'sk-test' },
         body: JSON.stringify(request),
     }).then((r) => r.text());
-    const firstSession = lastRequest.headers.session_id;
+    const firstSession = lastRequest.body.prompt_cache_key;
 
     const followUp = {
         ...request,
@@ -383,9 +421,9 @@ async function main() {
         'and sits immediately before the call it produced'
     );
     assert.strictEqual(
-        lastRequest.headers.session_id,
+        lastRequest.body.prompt_cache_key,
         firstSession,
-        'both turns carry the same session_id — a fresh one per request invalidates the replay'
+        'both turns carry the same conversation id — a fresh one per request invalidates the replay, and misses the cache'
     );
 
     // --- a backend that refuses the replay must not take the session down with it.

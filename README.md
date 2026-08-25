@@ -299,6 +299,10 @@ session: 66e2dce7-… · continue it with run_agent({ session: "66e2dce7-…", p
 
 A zero column is printed rather than dropped: a column that disappears is a column that cannot be compared.
 
+**A second run on the same question is nearly free; a new question is not.** Through the ChatGPT subscription the cache is grouped per conversation, so continuing a delegated run — passing its `session` back to `run_agent` — reuses the prefix, while a fresh run pays for the whole system prompt again. Measured on `gpt-5.6-luna`: a 17,933-token request costs 17,933 input tokens the first time and 1,037 input + 16,896 cache read when the same session asks again, which is 94% of it served from the cache.
+
+**A cache hit through the adapter is counted as one.** OpenAI-shaped backends — the ChatGPT subscription included — cache the prompt prefix implicitly and report the hit *inside* the input count, where this line, like Anthropic, counts it beside them. The adapter splits it back out, so `cache read` on a codex or DeepSeek profile is the real number instead of a standing zero, and the same tokens are not priced twice at the uncached rate. `cache write` stays zero off Anthropic: an implicit cache never bills a write.
+
 **The token counts are whole-run totals** taken from the CLI's own `modelUsage`. Summing the transcript instead gives a multiple of the truth — the CLI writes one line per content block and repeats the full message usage on each, so a run whose assistant messages carry text plus a tool call appears to have cost twice what it did. The figure to trust is the one printed here; it equals the sum over *distinct* assistant message ids in the transcript, which is the same fact counted once.
 
 **The money is only claimed where it is known.** The CLI's `total_cost_usd` prices every run against Anthropic's table — its result even carries `provider: "firstParty"` for a DeepSeek call — so off Anthropic it is wrong by roughly an order of magnitude. On an Anthropic profile it is reported as-is; anywhere else the rate has to come from the profile, in USD per million tokens:

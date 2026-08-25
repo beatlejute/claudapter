@@ -24,7 +24,7 @@ const CHUNKS = [
     { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"file_' } }] } }] },
     { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: 'path":"a.js"}' } }] } }] },
     { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
-    { choices: [], usage: { prompt_tokens: 120, completion_tokens: 34 } },
+    { choices: [], usage: { prompt_tokens: 120, completion_tokens: 34, prompt_tokens_details: { cached_tokens: 90 } } },
 ];
 
 let lastUpstreamRequest = null;
@@ -128,6 +128,10 @@ async function main() {
     const messageDelta = events.find((e) => e.event === 'message_delta');
     assert.strictEqual(messageDelta.data.delta.stop_reason, 'tool_use', 'stop_reason=tool_use');
     assert.strictEqual(messageDelta.data.usage.output_tokens, 34, 'usage forwarded');
+    // A hit on the prefix cache is counted inside prompt_tokens upstream and beside the input here,
+    // where every reader sums the two. Reported as it arrives it is invisible, and charged twice.
+    assert.strictEqual(messageDelta.data.usage.cache_read_input_tokens, 90, 'the cached prefix is reported');
+    assert.strictEqual(messageDelta.data.usage.input_tokens, 30, 'and subtracted from the input that counted it');
 
     const blockIndexes = events.filter((e) => e.event === 'content_block_start').map((e) => e.data.index);
     assert.deepStrictEqual(blockIndexes, [...new Set(blockIndexes)], 'block indexes are unique');
@@ -164,6 +168,7 @@ async function main() {
     assert.deepStrictEqual(message.content[1].input, { cmd: 'ls' }, 'arguments parsed');
     assert.strictEqual(message.stop_reason, 'tool_use', 'stop_reason correct');
     assert.strictEqual(message.usage.input_tokens, 7, 'usage.input_tokens');
+    assert.strictEqual(message.usage.cache_read_input_tokens, 0, 'no cache hit reported when there was none');
 
     // --- 3. count_tokens
     const counted = await fetch(`${base}/v1/messages/count_tokens`, {

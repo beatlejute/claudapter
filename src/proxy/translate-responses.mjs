@@ -209,6 +209,21 @@ function anthropicToResponses(body, options = {}) {
     return request;
 }
 
+// A cached prefix is counted *inside* `input_tokens` here and *outside* it on Anthropic, where
+// every reader downstream adds the two back together — the CLI's context meter, claudapter's cost
+// line. Report the cached part separately and subtract it, or it is counted twice at the full rate.
+// There is no write-side counterpart: caching here is implicit and a write is never billed apart.
+function usageToAnthropic(usage = {}, fallbackInput = 0) {
+    const total = Number(usage.input_tokens ?? fallbackInput) || 0;
+    const cached = Number(usage.input_tokens_details?.cached_tokens) || 0;
+    return {
+        input_tokens: Math.max(0, total - cached),
+        output_tokens: Number(usage.output_tokens) || 0,
+        cache_read_input_tokens: cached,
+        cache_creation_input_tokens: 0,
+    };
+}
+
 function responsesToAnthropic(payload, fallbackModel) {
     const content = [];
     for (const item of payload.output || []) {
@@ -235,7 +250,7 @@ function responsesToAnthropic(payload, fallbackModel) {
             ? 'tool_use'
             : stopReasonFor(truncated ? 'length' : 'stop'),
         stop_sequence: null,
-        usage: { input_tokens: usage.input_tokens ?? 0, output_tokens: usage.output_tokens ?? 0 },
+        usage: usageToAnthropic(usage),
     };
 }
 
@@ -308,7 +323,12 @@ function createResponsesStreamTranslator(model, options = {}) {
     // message_start goes out before the backend has counted anything, and it is the number the CLI
     // draws its context meter and its auto-compact threshold from — left at zero it never compacts.
     // So it opens with our estimate and the terminal event corrects it.
-    let usage = { input_tokens: options.inputTokens || 0, output_tokens: 0 };
+    let usage = {
+        input_tokens: options.inputTokens || 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
     let sawToolCall = false;
     let stopReason = 'end_turn';
     let failure = null;
@@ -415,11 +435,7 @@ function createResponsesStreamTranslator(model, options = {}) {
                     const response = payload.response || {};
                     completed = true;
                     if (response.output?.length) output = response.output;
-                    if (response.usage)
-                        usage = {
-                            input_tokens: response.usage.input_tokens ?? usage.input_tokens,
-                            output_tokens: response.usage.output_tokens ?? 0,
-                        };
+                    if (response.usage) usage = usageToAnthropic(response.usage, usage.input_tokens);
                     if (response.incomplete_details?.reason === 'max_output_tokens') stopReason = 'max_tokens';
                     break;
                 }
@@ -446,7 +462,7 @@ function createResponsesStreamTranslator(model, options = {}) {
             push('message_delta', {
                 type: 'message_delta',
                 delta: { stop_reason: sawToolCall ? 'tool_use' : stopReason, stop_sequence: null },
-                usage: { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens },
+                usage: { ...usage },
             });
             push('message_stop', { type: 'message_stop' });
             return drain();

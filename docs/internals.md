@@ -579,6 +579,20 @@ The API surface an adapter actually has to cover (by occurrence count in the bun
 | `/v1/messages/count_tokens` | 14 | needed for the context indicator |
 | `thinking_delta` | 15 | not reproducible across the bridge |
 
+`cache_control` is dropped rather than translated because caching on these backends is implicit, keyed on the prompt prefix — but a hit still has to be *reported*. It arrives folded into the input count (`usage.input_tokens_details.cached_tokens`, or `prompt_tokens_details.cached_tokens` on the chat protocol), while the Messages API counts cached tokens beside the input and every reader downstream sums the two: the CLI's context meter, the delegated-run report, a profile's own `pricing` block. The adapter subtracts the cached part and returns it as `cache_read_input_tokens`, so a hit shows as a hit instead of as input charged a second time at the uncached rate. `cache_creation_input_tokens` is always zero — an implicit cache never bills the write.
+
+*Which* cache a turn lands in is not implicit, though. Every Responses request carries `prompt_cache_key`: the same conversation id the codex backend gets in its `session_id` header, derived from the opening messages, so the turns of one session keep landing on the prefix that session itself wrote. An upstream that rejects the field is opted out with `"promptCacheKey": false` in its `proxy.json` entry.
+
+Measured against the live codex backend, with `claude -p` on `gpt-5.6-luna` and a 17,933-token request:
+
+| runs | `input` | `cache read` |
+|---|---:|---:|
+| first ever | 17,933 | 0 |
+| second, same opening question | 1,037 | 16,896 |
+| second, different opening question | 17,933 | 0 |
+
+So the cache is real and it is worth 94% of the request — but that backend groups it by `session_id`, and a different opening question is a different session. Keying `prompt_cache_key` on the prefix instead of the conversation was tried and changed nothing there, which is why it follows the conversation id. The practical consequence is [in the README](../README.md#what-a-run-cost): a delegated run continued through its `session` reuses the prefix, a fresh `run_agent` pays for it again.
+
 ### The ChatGPT subscription protocol
 
 Reverse-engineered from the open source of [claudex](https://github.com/pilc80/claudex) (Rust):

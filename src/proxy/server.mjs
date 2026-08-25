@@ -248,12 +248,22 @@ async function buildUpstreamCall(req, anthropic, upstream, name, { upstreamModel
         });
         const headers = { 'content-type': 'application/json', ...(upstream.headers || {}) };
 
+        // Caching the prompt prefix is implicit on this API; which cache a request is routed to is
+        // not. The conversation id is the grouping asked for, and on the codex backend it is also
+        // the grouping actually used: measured there, two runs sharing a 16.9k-token system prefix
+        // but opening on different questions hit nothing, while two on the same question shared
+        // 16,896 tokens — that backend keys its cache on session_id, and prompt_cache_key follows it
+        // rather than fighting it. An upstream that rejects the field opts out with
+        // "promptCacheKey": false in proxy.json.
+        const conversation = conversationId(translated.input);
+        if (upstream.promptCacheKey !== false) translated.prompt_cache_key = conversation;
+
         if (upstream.auth === 'chatgpt-oauth') {
             const { accessToken, accountId } = await getAuth();
             headers.authorization = `Bearer ${accessToken}`;
             if (accountId) headers['chatgpt-account-id'] = accountId;
             headers.originator = 'codex_cli_rs';
-            headers.session_id = conversationId(translated.input);
+            headers.session_id = conversation;
         } else {
             const key = upstreamKey(req, upstream);
             if (key) headers.authorization = `Bearer ${key}`;
