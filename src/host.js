@@ -414,6 +414,178 @@ function transcriptExists(sessionId) {
     return transcriptPathFor(sessionId) !== null;
 }
 
+// --- Live view of a delegated agent ---------------------------------------------------------
+//
+// A run started through the claudapter MCP server is a separate `claude -p` process: it says nothing
+// until it is finished, and from the tab it looks the same whether it is thinking or hung. The server
+// now picks the session id before the spawn and drops a manifest in agent-runs/, so the transcript it
+// is about to write is known here from the run's first second and can simply be followed.
+//
+// Everything below is one-way, host to page. Nothing read out of an agent's transcript is ever sent
+// back into the tab's own conversation: the parent session's context stays exactly what it was — the
+// tool call it made and, at the end, the tool result. This is a window onto the run, not a channel
+// into the turn.
+const AGENT_RUNS_DIR = path.join(DIR, 'agent-runs');
+// A frame shows the tail of a run, not its history. Older lines are dropped as they scroll past,
+// which also keeps a long agent transcript from being carried into the page in one message.
+const MAX_RUN_EVENTS = 160;
+const MAX_EVENT_TEXT = 1200;
+// A transcript line is JSON on one line, but a 400 KB tool result is also JSON on one line. The tail
+// is read in bounded chunks so a single enormous line cannot pull the whole file into the host.
+const MAX_TAIL_BYTES = 512 * 1024;
+const RUN_POLL_MS = 700;
+
+function readAgentRuns() {
+    let files = [];
+    try {
+        files = fs.readdirSync(AGENT_RUNS_DIR).filter((f) => f.endsWith('.json'));
+    } catch {
+        return [];
+    }
+    const runs = [];
+    for (const f of files) {
+        const run = readJson(path.join(AGENT_RUNS_DIR, f));
+        if (run && typeof run.session === 'string') runs.push(run);
+    }
+    return runs.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+}
+
+// One readable line per tool call: the argument that names what it touched, not the whole input.
+function toolArgument(input) {
+    if (!input || typeof input !== 'object') return '';
+    for (const key of ['file_path', 'command', 'pattern', 'path', 'query', 'url', 'prompt', 'description']) {
+        const v = input[key];
+        if (typeof v === 'string' && v.trim()) return v.replace(/\s+/g, ' ').trim().slice(0, 200);
+    }
+    return '';
+}
+
+function blockEvents(entry, out) {
+    const content = entry.message && entry.message.content;
+    if (typeof content === 'string') {
+        if (content.trim()) out.push({ k: entry.type === 'user' ? 'prompt' : 'text', t: content.slice(0, MAX_EVENT_TEXT) });
+        return;
+    }
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+        if (!block || typeof block !== 'object') continue;
+        if (block.type === 'text' && typeof block.text === 'string' && block.text.trim())
+            out.push({ k: entry.type === 'user' ? 'prompt' : 'text', t: block.text.slice(0, MAX_EVENT_TEXT) });
+        else if (block.type === 'thinking') out.push({ k: 'thinking' });
+        else if (block.type === 'tool_use') out.push({ k: 'tool', n: String(block.name || 'tool'), t: toolArgument(block.input) });
+        else if (block.type === 'tool_result') out.push({ k: 'result', ok: !block.is_error });
+    }
+}
+
+// Read only what has been appended since the last pass. A transcript that came back shorter than the
+// offset (a fork, a manual edit) is re-read from the start rather than decoded from the middle.
+function tailTranscript(sessionId, state) {
+    const file = transcriptPathFor(sessionId);
+    if (!file) return state;
+    let size = 0;
+    try {
+        size = fs.statSync(file).size;
+    } catch {
+        return state;
+    }
+    if (size === state.size) return state;
+    let from = size < state.size ? 0 : state.offset;
+    if (size < state.size) state.events = [];
+    if (size - from > MAX_TAIL_BYTES) from = size - MAX_TAIL_BYTES;
+
+    let text = '';
+    let fd = null;
+    try {
+        fd = fs.openSync(file, 'r');
+        const buffer = Buffer.alloc(size - from);
+        fs.readSync(fd, buffer, 0, buffer.length, from);
+        text = buffer.toString('utf8');
+    } catch {
+        return state;
+    } finally {
+        if (fd !== null)
+            try {
+                fs.closeSync(fd);
+            } catch {}
+    }
+
+    // The last line may be half-written; its bytes are left unconsumed for the next pass.
+    const lines = text.split('\n');
+    const trailing = lines.pop() ?? '';
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        let entry = null;
+        try {
+            entry = JSON.parse(line);
+        } catch {
+            continue;
+        }
+        if (!entry || (entry.type !== 'user' && entry.type !== 'assistant')) continue;
+        blockEvents(entry, state.events);
+    }
+    if (state.events.length > MAX_RUN_EVENTS) state.events = state.events.slice(-MAX_RUN_EVENTS);
+    state.size = size;
+    state.offset = size - Buffer.byteLength(trailing, 'utf8');
+    return state;
+}
+
+function agentRunsPayload() {
+    const tails = (S.agentTails ||= new Map());
+    const runs = readAgentRuns();
+    const alive = new Set(runs.map((r) => r.session));
+    for (const id of [...tails.keys()]) if (!alive.has(id)) tails.delete(id);
+
+    return runs.map((run) => {
+        let state = tails.get(run.session);
+        if (!state) tails.set(run.session, (state = { offset: 0, size: -1, events: [] }));
+        tailTranscript(run.session, state);
+        return {
+            session: run.session,
+            profile: run.profile || null,
+            model: run.model || null,
+            mode: run.mode || null,
+            cwd: run.cwd || null,
+            prompt: typeof run.prompt === 'string' ? run.prompt : '',
+            promptLength: run.promptLength ?? (run.prompt ? run.prompt.length : 0),
+            resumed: Boolean(run.resumed),
+            startedAt: run.startedAt || null,
+            finishedAt: run.finishedAt || null,
+            state: run.state || 'running',
+            turns: run.turns ?? null,
+            tokens: run.tokens || null,
+            error: run.error || null,
+            events: state.events,
+        };
+    });
+}
+
+// Polled rather than watched: the manifest changes twice in a run's life, while the transcript it
+// points at grows all the way through. The timer only exists while something is actually running,
+// and stops itself one pass after the last run has ended.
+function pumpAgentRuns() {
+    let payload = [];
+    try {
+        payload = agentRunsPayload();
+    } catch (e) {
+        dlog('agent runs failed', e.message);
+    }
+    const stamp = JSON.stringify(payload);
+    if (stamp !== S.agentRunsStamp) {
+        S.agentRunsStamp = stamp;
+        for (const w of S.webviews) post(w, { type: 'ccx:agentRuns', runs: payload });
+    }
+    const live = payload.some((r) => r.state === 'running');
+    clearTimeout(S.agentRunsTimer);
+    S.agentRunsTimer = live ? setTimeout(pumpAgentRuns, RUN_POLL_MS) : null;
+}
+
+// A manifest appearing is the one moment the poll has to be woken up; after that it keeps itself
+// going for as long as a run is live.
+function wakeAgentRuns() {
+    clearTimeout(S.agentRunsTimer);
+    S.agentRunsTimer = setTimeout(pumpAgentRuns, 0);
+}
+
 // --- Content search for the session picker --------------------------------------------------
 //
 // The stock search box only matches a row's title and git branch, both already in memory for every
@@ -1047,6 +1219,12 @@ function watchDir(dir, onChange) {
 // Installed from attachWebview, not only from attachPanel: the session list is a sidebar webview
 // with no panel of its own, and it still has to see bindings.json change to repaint its icons
 function ensureWatchers() {
+    if (!S.agentRunsWatcher) {
+        try {
+            fs.mkdirSync(AGENT_RUNS_DIR, { recursive: true });
+        } catch {}
+        S.agentRunsWatcher = watchDir(AGENT_RUNS_DIR, wakeAgentRuns);
+    }
     if (!S.settingsWatcher) S.settingsWatcher = watchFile(SETTINGS_FILE, broadcast);
     if (!S.bindingsWatcher) S.bindingsWatcher = watchFile(BINDINGS_FILE, broadcast);
     if (!S.profilesWatcher) S.profilesWatcher = watchDir(PROFILES_DIR, broadcast);
@@ -1137,6 +1315,10 @@ function attachWebview(webview) {
         if (m.type === 'ccx:get') {
             postIcons(webview);
             post(webview, { type: 'ccx:state', ...stateFor(sessionId, webview) });
+            // A tab that opens while a run is already going gets its frame filled in rather than
+            // waiting for the next line of that agent's transcript.
+            S.agentRunsStamp = null;
+            wakeAgentRuns();
         } else if (m.type === 'ccx:session') {
             // The webview tracks the active channel itself, so this id is authoritative
             webview.__ccxSessionId = m.sessionId || null;
@@ -1238,4 +1420,4 @@ function attachPanel(panel) {
     decorate(panel);
 }
 
-module.exports = { renderScript, attachPanel, envFor, profileIcons };
+module.exports = { renderScript, attachPanel, envFor, profileIcons, agentRunsPayload };

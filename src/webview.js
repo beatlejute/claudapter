@@ -38,6 +38,17 @@
     var searchDebounceTimer = null;
     var spellcheckSeq = 0;
     var spellcheckTimer = null;
+    // Delegated runs reported by the host, newest last, and the per-frame open/closed state. Both
+    // live here rather than in the DOM: React owns the nodes a frame hangs off and re-creates them
+    // freely, so anything remembered inside one is lost on the next commit.
+    var agentRuns = [];
+    var frameOpen = {};
+    var frameTouched = {};
+    var claimedRuns = {};
+    // The last progress the app reported for a task-style subagent, by tool_use id. Kept because the
+    // app DELETES its entry the moment the task ends (handleTaskNotification), and a frame that blanks
+    // itself exactly when the run finishes is the one moment it is worth reading.
+    var taskSnapshots = {};
     var spellcheckComposer = null;
     var spellcheckText = '';
     var spellcheckUnknown = new Set();
@@ -235,6 +246,7 @@
             decorateModelAndEffort();
             decorateSessionList();
             decorateTranscript();
+            decorateAgentFrames();
             applyHidden();
         } else if (d.type === 'ccx:icons') {
             icons = d.icons || {};
@@ -253,6 +265,13 @@
             if (d.sessionId !== messageTimesSession) return;
             messageTimes = d.times || {};
             decorateTranscript();
+        } else if (d.type === 'ccx:agentRuns') {
+            // Inert data for a read-only frame. It is never written into the composer, never sent
+            // back to the host, and never handed to the app's own session object — the tab's context
+            // is the tool call and its result, and that is all it stays.
+            agentRuns = Array.isArray(d.runs) ? d.runs : [];
+            claimedRuns = {};
+            decorateAgentFrames();
         }
     });
 
@@ -901,6 +920,340 @@
         }
     }
 
+    // --- Live subagent frames ------------------------------------------------------------------
+    //
+    // A delegated run is invisible while it happens. A native subagent renders as a fold with a tool
+    // count, and a run_agent call as a spinner; in both cases the one thing that would say whether it
+    // is working or stuck — what the agent is actually doing — is the thing not shown.
+    //
+    // The two sources are different but the frame is the same. A native subagent's whole conversation
+    // is already in this page: its turns arrive on the same stream as everything else, tagged with the
+    // tool_use id of the Task call that started them (`parentToolUseId` on a streamed or replayed
+    // assistant turn, `sdkParentToolUseId` on one rebuilt from the SDK envelope), and the app files
+    // them into `session.messages` and then declines to draw them. Nothing has to be fetched for that
+    // one; it is a rendering job. A run_agent call is a separate process, so its lines come from the
+    // host, which follows the agent's own transcript.
+    //
+    // Neither path feeds anything back: a frame is an inert sibling node inside the tool-call block,
+    // built from data the page already has or was handed, and the parent turn never learns it exists.
+    var TASK_TOOLS = { Task: 1, Agent: 1 };
+    var MCP_AGENT_TOOL = 'mcp__claudapter-agents__run_agent';
+
+    // The tool_use block is not in the DOM either — the div only carries a hashed class name. It is a
+    // prop of the component that renders it (`content`, a wrapper whose own `.content` is the raw
+    // block), which is the same walk messagePropOf already does for a turn, one level further in.
+    function toolUseOf(node) {
+        var key = fiberKeyOf(node);
+        var fiber = key ? node[key] : null;
+        for (var d = 0; fiber && d < 8; d++, fiber = fiber.return) {
+            var props = fiber.memoizedProps;
+            if (!props) continue;
+            var candidates = [props.content, props.block, props.toolUse];
+            for (var i = 0; i < candidates.length; i++) {
+                var c = candidates[i];
+                if (!c || typeof c !== 'object') continue;
+                var raw = c.type === 'tool_use' ? c : c.content;
+                if (raw && raw.type === 'tool_use' && typeof raw.id === 'string' && typeof raw.name === 'string')
+                    return { block: raw, wrapper: c };
+            }
+        }
+        return null;
+    }
+
+    // A wrapper exposes its tool result as a signal; its presence is what "this run has ended" means
+    // for a native subagent, which reports no state of its own.
+    function toolFinished(wrapper) {
+        try {
+            var result = wrapper && wrapper.toolResult;
+            return Boolean(result && 'value' in result ? result.value : result);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function blockOf(entry) {
+        try {
+            var raw = entry && entry.content;
+            return raw && typeof raw === 'object' && typeof raw.type === 'string' ? raw : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // A native subagent reaches the page in one of two shapes, and which one depends on how the
+    // harness ran it.
+    //
+    // Inline, it is a conversation: its turns arrive on this tab's stream tagged with the tool_use id,
+    // and messagesFor() below reads them whole. Run as a *task* (`task_type: "local_agent"` — what the
+    // Agent tool does here, in the foreground as well as in the background), its turns never reach the
+    // page at all; they go to the task's own output file. What the page gets instead is a progress
+    // feed — `system/task_started|task_progress|task_notification` — which the app files into a
+    // `subagentTasks` map and then reads only to count them for telemetry.
+    //
+    // So the task shape gives a summary, not a transcript: the last few tool names, a one-line summary
+    // and running totals. That is what a frame can show for it, and it is still the difference between
+    // "working" and "stuck".
+    function taskFor(toolUseId) {
+        var tasks = sessionField('subagentTasks');
+        try {
+            if (tasks && typeof tasks.forEach === 'function')
+                tasks.forEach(function (t) {
+                    if (t && t.toolUseId === toolUseId) taskSnapshots[toolUseId] = t;
+                });
+        } catch (e) {
+            /* an unreadable map is one source missing, not a broken frame */
+        }
+        return taskSnapshots[toolUseId] || null;
+    }
+
+    function taskEvents(task) {
+        var events = [];
+        if (typeof task.prompt === 'string' && task.prompt.trim()) events.push({ k: 'prompt', t: task.prompt.slice(0, 1200) });
+        var tools = task.recentTools;
+        if (Array.isArray(tools)) for (var i = 0; i < tools.length; i++) if (tools[i]) events.push({ k: 'tool', n: String(tools[i]) });
+        if (typeof task.summary === 'string' && task.summary.trim()) events.push({ k: 'text', t: task.summary.slice(0, 1200) });
+        return events;
+    }
+
+    // The same shape the host sends for a delegated run, built here from the page's own messages, so
+    // one renderer covers every source.
+    function messagesFor(toolUseId) {
+        var messages = sessionField('messages');
+        if (!Array.isArray(messages)) return null;
+        var events = [];
+        for (var i = 0; i < messages.length; i++) {
+            var m = messages[i];
+            if (!m) continue;
+            var parent = m.parentToolUseId || m.sdkParentToolUseId;
+            if (parent !== toolUseId) continue;
+            var content = m.content;
+            if (!Array.isArray(content)) continue;
+            for (var j = 0; j < content.length; j++) {
+                var raw = blockOf(content[j]);
+                if (!raw) continue;
+                if (raw.type === 'text' && typeof raw.text === 'string' && raw.text.trim())
+                    events.push({ k: m.type === 'user' ? 'prompt' : 'text', t: raw.text.slice(0, 1200) });
+                else if (raw.type === 'thinking') events.push({ k: 'thinking' });
+                else if (raw.type === 'tool_use') events.push({ k: 'tool', n: String(raw.name || 'tool'), t: toolArgument(raw.input) });
+                else if (raw.type === 'tool_result') events.push({ k: 'result', ok: !raw.is_error });
+            }
+        }
+        return events.slice(-160);
+    }
+
+    // Messages first: where they exist they are the whole conversation, which no progress feed can
+    // match. The task snapshot is what is left when the turns went somewhere this page cannot see.
+    function nativeEvents(toolUseId, task) {
+        var fromMessages = messagesFor(toolUseId);
+        if (fromMessages === null) return task ? taskEvents(task) : null;
+        if (fromMessages.length) return fromMessages;
+        return task ? taskEvents(task) : fromMessages;
+    }
+
+    function toolArgument(input) {
+        if (!input || typeof input !== 'object') return '';
+        var keys = ['file_path', 'command', 'pattern', 'path', 'query', 'url', 'prompt', 'description'];
+        for (var i = 0; i < keys.length; i++) {
+            var v = input[keys[i]];
+            if (typeof v === 'string' && v.trim()) return v.replace(/\s+/g, ' ').trim().slice(0, 200);
+        }
+        return '';
+    }
+
+    // An MCP server never sees the tool_use id of the call that reached it, so the manifest cannot
+    // name the block it belongs to. The prompt can: it is the same string on both sides, and it is
+    // already on screen. Where two live runs carry the same prompt the newest unclaimed one wins,
+    // which is the only answer that keeps two identical calls from sharing one frame.
+    function runForPrompt(prompt) {
+        if (typeof prompt !== 'string' || !prompt.trim()) return null;
+        var best = null;
+        for (var i = 0; i < agentRuns.length; i++) {
+            var run = agentRuns[i];
+            if (claimedRuns[run.session]) continue;
+            var a = run.prompt || '';
+            var b = prompt;
+            var n = Math.min(a.length, b.length);
+            if (!n || a.slice(0, n) !== b.slice(0, n)) continue;
+            if (!best || (run.startedAt || 0) >= (best.startedAt || 0)) best = run;
+        }
+        if (best) claimedRuns[best.session] = true;
+        return best;
+    }
+
+    function span(ms) {
+        if (!ms || ms < 0) return '';
+        var s = Math.round(ms / 1000);
+        if (s < 60) return s + 's';
+        var m = Math.floor(s / 60);
+        return m + 'm ' + (s % 60) + 's';
+    }
+
+    function eventLine(e) {
+        if (e.k === 'tool') return { cls: 'ccx-agent-tool', text: e.t ? e.n + ' ' + e.t : e.n };
+        if (e.k === 'thinking') return { cls: 'ccx-agent-thinking', text: 'thinking' };
+        if (e.k === 'result') return null;
+        if (e.k === 'prompt') return { cls: 'ccx-agent-prompt', text: e.t };
+        return { cls: 'ccx-agent-text', text: e.t };
+    }
+
+    function ensureChild(parent, className, tag) {
+        for (var i = 0; i < parent.children.length; i++)
+            if (parent.children[i].className === className) return parent.children[i];
+        var el = document.createElement(tag || 'div');
+        el.className = className;
+        parent.appendChild(el);
+        return el;
+    }
+
+    // The frame is appended to the tool-call div rather than inserted anywhere particular, for the
+    // reason the timestamps already are: React reconciles that subtree by references it holds, and an
+    // unknown node at the end stays clear of its insertBefore calls. If a commit does drop it, the
+    // observer puts it back on the next pass.
+    function paintFrame(host, id, open, meta, events) {
+        var frame = ensureChild(host, 'ccx-agent-frame');
+        frame.dataset.ccxOpen = open ? '1' : '0';
+        frame.dataset.ccxState = meta.state;
+
+        var head = ensureChild(frame, 'ccx-agent-head');
+        if (!head.dataset.ccxWired) {
+            head.dataset.ccxWired = '1';
+            head.addEventListener('click', function (e) {
+                e.stopPropagation();
+                e.preventDefault();
+                // Read the current state off the node rather than the closure: this listener is wired
+                // once and every later paint has its own `meta`.
+                frameOpen[id] = frame.dataset.ccxOpen !== '1';
+                frameTouched[id] = true;
+                decorateAgentFrames();
+            });
+        }
+        var caret = ensureChild(head, 'ccx-agent-caret', 'span');
+        caret.textContent = open ? '▾' : '▸';
+        var title = ensureChild(head, 'ccx-agent-title', 'span');
+        if (title.textContent !== meta.title) title.textContent = meta.title;
+        var note = ensureChild(head, 'ccx-agent-note', 'span');
+        if (note.textContent !== meta.note) note.textContent = meta.note;
+
+        var body = ensureChild(frame, 'ccx-agent-body');
+        if (!open || !events) {
+            body.textContent = '';
+            return;
+        }
+        // Rebuilt only when the tail actually changed: this runs on every observer pass, and rewriting
+        // the body each time would fight the user's own scrolling inside it.
+        var stamp = String(events.length) + '|' + (events.length ? JSON.stringify(events[events.length - 1]) : '');
+        if (body.dataset.ccxStamp === stamp) return;
+        body.dataset.ccxStamp = stamp;
+        var atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+        body.textContent = '';
+        if (!events.length) {
+            var idle = document.createElement('div');
+            idle.className = 'ccx-agent-idle';
+            idle.textContent = meta.running ? 'starting…' : 'nothing was recorded for this run';
+            body.appendChild(idle);
+        }
+        for (var i = 0; i < events.length; i++) {
+            var line = eventLine(events[i]);
+            if (!line) continue;
+            var row = document.createElement('div');
+            row.className = line.cls;
+            row.textContent = line.text;
+            body.appendChild(row);
+        }
+        // Only follow the tail for a reader who was already at it. Someone who scrolled back to read
+        // an earlier line in a live frame should not be yanked forward by the next one.
+        if (atBottom) body.scrollTop = body.scrollHeight;
+    }
+
+    function dropFrame(host) {
+        for (var i = 0; i < host.children.length; i++)
+            if (host.children[i].className === 'ccx-agent-frame') {
+                host.children[i].remove();
+                return;
+            }
+    }
+
+    // Open while it runs, closed once it has answered — the answer itself is the tool result right
+    // below. A frame the reader has touched keeps whatever they chose.
+    function frameIsOpen(id, running) {
+        return frameTouched[id] ? Boolean(frameOpen[id]) : running;
+    }
+
+    function nativeMeta(block, running, events, task) {
+        var input = block.input || {};
+        var name = typeof input.subagent_type === 'string' && input.subagent_type ? input.subagent_type : 'subagent';
+        var description = typeof input.description === 'string' && input.description ? input.description : task && task.description;
+        // The task's own totals beat anything counted here: they cover the whole run, including the
+        // tool calls whose names never made it into the last-three list.
+        var usage = task && task.usage;
+        var counted = 0;
+        if (events) for (var i = 0; i < events.length; i++) if (events[i].k === 'tool') counted++;
+        var tools = usage && usage.toolUses ? usage.toolUses : counted;
+        // Grouped the same way the delegated run's own report groups its totals ('en-US', not the
+        // runtime locale), so two frames side by side read as one thing.
+        var tokens = usage && usage.totalTokens ? Number(usage.totalTokens).toLocaleString('en-US') + ' tok' : '';
+        return {
+            running: running,
+            state: running ? 'running' : 'done',
+            title: name + (description ? ' · ' + description : ''),
+            note: [running ? 'running' : 'done', tools ? tools + ' tool calls' : '', tokens].filter(Boolean).join(' · '),
+        };
+    }
+
+    function runMeta(run) {
+        var running = run.state === 'running';
+        var elapsed = span((running ? Date.now() : run.finishedAt || Date.now()) - (run.startedAt || 0));
+        return {
+            running: running,
+            state: run.state,
+            title: (run.profile || 'agent') + (run.model ? ' · ' + run.model : ''),
+            note: [running ? 'running' : run.state, elapsed, run.tokens || '', (run.error || '').slice(0, 80)].filter(Boolean).join(' · '),
+        };
+    }
+
+    function decorateAgentFrames() {
+        try {
+            claimedRuns = {};
+            var nodes = document.querySelectorAll('[class*="toolUse_"]');
+            for (var i = 0; i < nodes.length; i++) {
+                var host = nodes[i];
+                var found = toolUseOf(host);
+                var block = found && found.block;
+                if (!block) {
+                    dropFrame(host);
+                    continue;
+                }
+                if (TASK_TOOLS[block.name]) {
+                    var running = !toolFinished(found.wrapper);
+                    var open = frameIsOpen(block.id, running);
+                    // The body is the whole cost of this pass: filling it means walking every message
+                    // in the transcript looking for the ones tagged with this call, and this runs on
+                    // every commit. A closed frame is not worth that, and a transcript full of old
+                    // Task calls is exactly where it would add up.
+                    // Read on every pass, open or closed: the app throws the entry away when the task
+                    // ends, so a frame that only looked while it was open would miss the final state.
+                    var task = taskFor(block.id);
+                    var events = open ? nativeEvents(block.id, task) : null;
+                    // Nothing readable at all means the session object is not reachable this commit —
+                    // leaving the previous frame alone beats blanking it on a transient miss.
+                    if (open && !events) continue;
+                    paintFrame(host, block.id, open, nativeMeta(block, running, events, task), events);
+                } else if (block.name === MCP_AGENT_TOOL) {
+                    var run = runForPrompt(block.input && block.input.prompt);
+                    if (!run) {
+                        dropFrame(host);
+                        continue;
+                    }
+                    paintFrame(host, block.id, frameIsOpen(block.id, run.state === 'running'), runMeta(run), run.events || []);
+                } else {
+                    dropFrame(host);
+                }
+            }
+        } catch (e) {
+            /* a missing frame is a plainer tool call, not a broken transcript */
+        }
+    }
+
     function watchPicker() {
         var timer = null;
         new MutationObserver(function () {
@@ -910,6 +1263,7 @@
                 decorateModelAndEffort();
                 decorateSessionList();
                 decorateTranscript();
+                decorateAgentFrames();
                 applyHidden();
                 watchComposerSpellcheck();
                 syncAttachmentPrompt();
@@ -2045,6 +2399,28 @@
         '.ccx-model{margin-left:auto;opacity:.6;font-size:11px}',
         '.ccx-prov-tag{opacity:.7;font-size:11px;padding:1px 6px;border-radius:8px;background:var(--vscode-badge-background)}',
         '.ccx-model-tag{margin-left:6px;opacity:.55;font-size:10px;font-family:var(--vscode-editor-font-family, monospace)}',
+        // A frame is a block inside the tool-call node, not a floating panel: it has to read as part of
+        // that call, and it has to survive the app's own reconciliation of the subtree it sits in.
+        '.ccx-agent-frame{margin:4px 0 2px;border:1px solid var(--vscode-widget-border, rgba(128,128,128,.35));border-radius:6px;overflow:hidden;font:11px var(--vscode-font-family)}',
+        '.ccx-agent-head{display:flex;align-items:center;gap:6px;padding:3px 8px;cursor:pointer;background:var(--vscode-editorWidget-background, rgba(128,128,128,.08));user-select:none}',
+        '.ccx-agent-head:hover{background:var(--vscode-list-hoverBackground, rgba(128,128,128,.16))}',
+        '.ccx-agent-caret{flex:0 0 auto;width:10px;opacity:.6}',
+        '.ccx-agent-title{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.95}',
+        '.ccx-agent-note{margin-left:auto;flex:0 0 auto;opacity:.55;font-size:10px;white-space:nowrap}',
+        // Capped and scrollable rather than free to grow: a long run would otherwise push the rest of
+        // the turn off the screen every time it printed a line.
+        '.ccx-agent-frame[data-ccx-open="0"] .ccx-agent-body{display:none}',
+        '.ccx-agent-body{max-height:220px;overflow:auto;padding:4px 8px 6px;display:flex;flex-direction:column;gap:2px;font-family:var(--vscode-editor-font-family, monospace);font-size:10.5px;line-height:1.45}',
+        '.ccx-agent-frame[data-ccx-state="running"] .ccx-agent-caret{opacity:1}',
+        '.ccx-agent-tool{opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+        '.ccx-agent-tool::before{content:"> ";opacity:.6}',
+        '.ccx-agent-thinking{opacity:.4;font-style:italic}',
+        '.ccx-agent-thinking::before{content:"* ";font-style:normal}',
+        // The delegated prompt and the agent's own text read differently on purpose: one is what it was
+        // asked, the other is what it is saying back.
+        '.ccx-agent-prompt{opacity:.5;white-space:pre-wrap;padding-left:8px;border-left:2px solid var(--vscode-widget-border, rgba(128,128,128,.35))}',
+        '.ccx-agent-text{opacity:.9;white-space:pre-wrap}',
+        '.ccx-agent-idle{opacity:.45;font-style:italic}',
         '.ccx-model-effort{display:inline-flex;align-items:center;flex:0 0 auto;padding:0 8px;border-radius:8px;background:var(--vscode-badge-background, transparent);color:var(--vscode-descriptionForeground, var(--vscode-foreground));font:11px var(--vscode-font-family);line-height:18px;opacity:.9;pointer-events:none;user-select:none;white-space:nowrap}',
         // The row is display:flex;align-items:center;gap:8px, so ::before simply becomes its leading flex
         // item and the flex:1 title still ellipsizes. No child node, so nothing for React to reconcile.

@@ -32,6 +32,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Pinned sessions** — hover a row in the session history and click the pin: it moves to the top of the list and stays there, above everything else, however old it gets. A search still applies — a pinned row that no longer matches is filtered out like any other, and the ones that do match keep their place at the front. The pins live in `~/.claude/claudapter/pinned.json` and are shared by every tab.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
 - **Message timestamps** — every turn in the transcript gets a small local time, chat-app style, and a date separator ("Today", "Yesterday", or the date) wherever the day changes. Read straight off each message's own `.jsonl` timestamp, so it reflects when the turn actually happened, not when it rendered.
+- **A live frame under a subagent** — an `Agent`/`Task` call and a `run_agent` call both grow a small framed panel showing what the agent is doing while it does it: its prompt, the tools it reaches for, and what it is saying (in full where the page has the turns, as a running summary where it only has the progress feed). It opens itself while the run is going and folds away once the answer lands; click the header to keep it open. **Nothing it shows enters the parent conversation** — the tab's context stays the tool call and, at the end, the tool result. See [Watching a delegated run](#watching-a-delegated-run).
 - **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
 - **Local spellcheck with correction suggestions** — Russian words are checked locally with Hunspell. Misspellings receive a red wavy underline; right-click one to choose a correction. Only bounded, de-duplicated words leave the webview, and no draft text is sent over the network.
 - **Model and effort chip** — a small read-only chip in the composer's toolbar row, left of the mode picker: the model and reasoning effort this session is actually running (`Opus · xhigh`, or `· ultracode` when ultracode is selected). It reads the session's live signals, not `settings.json` — that file only holds the global defaults and would name the wrong chat.
@@ -232,6 +233,58 @@ Notes worth knowing before relying on it:
   ```
 
 - The run is recorded in `bindings.json`, so it carries its provider's icon in the session history like any tab, and in `agent-sessions.json`, which is what makes it resumable.
+
+### Watching a delegated run
+
+A delegated run used to be a black box for as long as it lasted: the answer arrives in one piece at
+the end, and until then a fifteen-minute run and a hung one look exactly alike. Both kinds of
+subagent now draw a frame inside their own tool call:
+
+```
+▾ Explore · find the watchers                     running · 3 tool calls
+  where are the fs watchers
+  > Grep fs.watch
+  > Read src/host.js
+  Two watchers are installed from ensureWatchers — one on▌
+```
+
+The frame is a view, not a channel. **Nothing in it is fed back into the tab's conversation**: the
+parent session's context is the tool call it made and the tool result it gets, exactly as before, and
+watching a run costs the parent no tokens at all.
+
+The three kinds are filled from different places:
+
+- **An inline subagent** — its turns arrive on this tab's own stream, tagged with the `tool_use` id of
+  the call that started them, and the app files them away and then declines to draw them. The frame
+  shows the whole conversation, because the whole conversation is already in the page.
+- **A subagent run as a task** — which is what the `Agent` tool does here, in the foreground as well
+  as in the background. Its turns never reach the page at all; they go to the task's own output file.
+  What the page does get is the progress feed the app collects into `subagentTasks` and otherwise only
+  counts for telemetry, so the frame shows *that*: the prompt, the last few tools it reached for, its
+  one-line summary, and running token and tool-call totals. A summary, not a transcript — but still
+  the difference between "working" and "stuck". The app throws the entry away the instant the task
+  ends, so the last thing it reported is kept rather than blanked at the one moment worth reading.
+- **A `run_agent` run** is a separate `claude -p` process, so the extension host follows it instead:
+  the MCP server picks the session id *before* the spawn (`--session-id`) and drops a manifest in
+  `~/.claude/claudapter/agent-runs/`, which is what makes the transcript the run is about to write
+  knowable from its first second. The host tails that file and forwards the tail; a manifest is swept
+  once the run has been over for two hours.
+
+What it does not do:
+
+- **It is the VS Code panel only.** The terminal CLI has its own rendering and is untouched.
+- **A run reopened later shows an empty frame.** Sidechain lines are filtered out of the transcript
+  when a session is replayed, and a task's progress feed is live-only to begin with, so a native
+  subagent leaves the page nothing after a reload. The frame is for a run you are watching, not for
+  reading back an old one. A `run_agent` frame goes with its manifest the same way.
+- **A task-shaped subagent is a progress view.** Its individual turns are not the page's to show; only
+  what the progress feed carries is.
+- **A `run_agent` frame is matched to its block by the prompt**, because an MCP server is never told
+  the `tool_use` id of the call that reached it. Two live runs started with the same prompt are told
+  apart by which one is newer, which is the best that can be done from here.
+- **Update granularity is a turn, not a token.** A native frame follows the live stream, but a
+  `run_agent` frame moves when the agent's transcript gets its next line — a second or so behind, not
+  character by character.
 
 ### What a run cost
 

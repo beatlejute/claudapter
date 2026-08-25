@@ -489,6 +489,58 @@ it reads the runtime's own locale rather than the CLI's configured one, which is
 choice here (Telegram does the same) and, unlike the attachment prompt, does not need to agree with what
 language the *model* answers in.
 
+### A subagent's turns reach the page in two shapes, and neither is drawn
+
+Everything a `Task` subagent says arrives on the same `io_message` stream as the rest of the tab, and the
+page keeps all of it. `N8` (the SDK-envelope → message converter) copies `parent_tool_use_id` onto every
+turn it builds, under two names with slightly different rules:
+
+```js
+let t = e.type === "user" ? e.parent_tool_use_id : null,
+    i = e.parent_tool_use_id ?? null;
+… new Up(e.type, …, { parentToolUseId: t, sdkParentToolUseId: i })
+```
+
+So a **user** turn carries the id under both names, an **assistant** turn rebuilt from an envelope only
+under `sdkParentToolUseId` — while an assistant turn assembled from a live stream gets it under
+`parentToolUseId`, because the assembler creates it that way (`new Up("assistant", [], {parentToolUseId: o})`,
+and `processStreamEvent(e.event, e.parent_tool_use_id)` is what partitions the stream by parent in the
+first place). Reading both is not belt-and-braces; each name alone misses a case.
+
+They are then filtered out at render: `_be` returns `null` for a user message with a `parentToolUseId`, and
+the assistant ones are folded into a `focus-fold` row keyed off `subagentSpans` — a tool count and nothing
+else.
+
+**But that path is not the one the `Agent` tool takes.** Measured on 2.1.241: an `Agent` call — foreground
+and background alike — runs as a *task* (`task_type: "local_agent"`), and its turns never reach the page.
+They go to the task's own `.output` file, and the parent transcript gets no `isSidechain` lines at all
+(checked on a session with two `Agent` calls: `"isSidechain":true` count zero, `"name":"Task"` count zero —
+the tool is called `Agent`, not `Task`, in this release). `CLAUDE_CODE_ENABLE_TASKS="0"` in `Qh()` does not
+prevent this.
+
+What the page gets for a task instead is `subagentTasks`, a signal fed by
+`system/task_started|task_progress|task_notification`:
+
+```js
+{ taskId, toolUseId, description, prompt, taskType, startTime, status,
+  usage: {totalTokens, toolUses, durationMs}, summary, recentTools /* last 3 */ }
+```
+
+`toolUseId` is the `Agent` call's own `tool_use` id, so it keys straight onto the block in the transcript.
+Nothing in the render layer reads any of it — all eighteen references sit in the session model and in one
+telemetry field (`subagent_count`) — and `handleTaskNotification` **deletes** the entry as soon as the task
+ends, so anything that wants to show a final state has to keep its own copy.
+
+The practical consequence for a patcher: a live view of a subagent needs **no new plumbing**, but it does
+need both sources — the message walk for an inline subagent, `subagentTasks` for a task-shaped one, and the
+former is the one to prefer where it has anything, since a summary is never as good as the turns. The
+property names survive minification the same way `message.timestamp` does — bun's minifier renames locals,
+not properties.
+
+What it cannot do is show an old run. `B5t`, the transcript → SDK-message converter, drops sidechain lines
+outright (`if (e.isSidechain) return !1`), so a session replayed from disk comes back without any of its
+subagents' turns. Watching a run is live-only unless the `.jsonl` is read separately.
+
 ### CSP and loading your own script
 
 `getHtmlForWebview` (line 140039) emits `script-src 'nonce-…'` (line 140070), and `localResourceRoots` is limited to the `webview/` and `resources/` directories inside the extension. An external file cannot be referenced by URI — hence the custom code is inlined into the HTML with their nonce, while the text itself is read from disk when the page is generated (so edits apply without re-patching).

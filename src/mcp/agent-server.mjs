@@ -18,6 +18,7 @@ import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const HOME = os.homedir();
@@ -31,6 +32,11 @@ const SESSIONS_FILE = path.join(RUNTIME, 'agent-sessions.json');
 // What each provider said the last time it was called, so list_profiles can answer "is this one
 // usable right now" without spending a call on every listing.
 const HEALTH_FILE = path.join(RUNTIME, 'agent-health.json');
+// One small manifest per delegated run, written before the CLI is spawned and updated when it
+// ends. It is the only thing that tells the extension host a run exists at all: this server talks
+// stdio to its parent CLI and has no channel to a VS Code window. The `session` field is what makes
+// the run watchable — the host resolves it to <projects>/<slug>/<id>.jsonl and tails that.
+const RUNS_DIR = path.join(RUNTIME, 'agent-runs');
 const PROXY_SCRIPT = path.join(RUNTIME, 'proxy', 'server.mjs');
 const LOG_FILE = path.join(RUNTIME, 'agent-server.log');
 
@@ -48,6 +54,15 @@ const DEFAULT_MODEL = 'sonnet';
 // an unbounded chain of them is a fork bomb with an API bill.
 const DEPTH_VAR = 'CLAUDAPTER_AGENT_DEPTH';
 const MAX_DEPTH = 2;
+
+// A manifest outlives its run only long enough for the frame to show the final line. Both bounds
+// are swept on every write, so a machine that never runs another agent still ends up clean.
+const MAX_RUN_FILES = 40;
+const RUN_FILE_TTL_MS = 2 * 60 * 60 * 1000;
+// The prompt is carried so the page can tell which run belongs to which run_agent block. It is
+// already in the tool call the user is looking at and in the agent's own transcript, so this adds
+// no exposure — but it is capped rather than copied whole.
+const MAX_RUN_PROMPT = 8000;
 
 const MAX_SESSIONS = 300;
 // A finished background task is kept so its report can be collected more than once; the oldest are
@@ -579,6 +594,71 @@ function lookupSession(sessionId) {
     return profile ? { profile } : null;
 }
 
+// -------------------------------------------------------------------------------- run manifests
+
+// Nothing about a delegated run is visible from the outside while it happens: the answer arrives in
+// one piece at the end, and a fifteen-minute run looks identical to a hung one. The manifest is the
+// hook the extension host needs — written before the spawn, so a run is watchable from its first
+// second, and rewritten once with the outcome.
+function runFile(id) {
+    return path.join(RUNS_DIR, `${id}.json`);
+}
+
+function sweepRuns(now = Date.now()) {
+    let files = [];
+    try {
+        files = fs
+            .readdirSync(RUNS_DIR)
+            .filter((f) => f.endsWith('.json'))
+            .map((f) => ({ f, at: fs.statSync(path.join(RUNS_DIR, f)).mtimeMs }))
+            .sort((a, b) => a.at - b.at);
+    } catch {
+        return;
+    }
+    const drop = new Set();
+    for (const { f, at } of files) if (now - at > RUN_FILE_TTL_MS) drop.add(f);
+    for (let i = 0; files.length - drop.size > MAX_RUN_FILES && i < files.length; i++) drop.add(files[i].f);
+    for (const f of drop) {
+        try {
+            fs.unlinkSync(path.join(RUNS_DIR, f));
+        } catch {}
+    }
+}
+
+function writeRun(id, patch) {
+    if (!id) return;
+    const current = readJson(runFile(id)) || {};
+    writeJson(runFile(id), { ...current, ...patch, id, at: new Date().toISOString() });
+}
+
+function openRun(ctx) {
+    // A resumed run keeps the id it is resuming, which is also the transcript the host will tail —
+    // so the two cases need no different treatment here.
+    const id = ctx.liveSession;
+    if (!id) return null;
+    sweepRuns();
+    writeRun(id, {
+        session: id,
+        profile: ctx.profile,
+        model: ctx.model,
+        mode: ctx.mode,
+        cwd: ctx.cwd,
+        depth: ctx.depth,
+        resumed: Boolean(ctx.session),
+        prompt: ctx.prompt.slice(0, MAX_RUN_PROMPT),
+        promptLength: ctx.prompt.length,
+        startedAt: Date.now(),
+        finishedAt: null,
+        state: 'running',
+    });
+    return id;
+}
+
+function closeRun(id, state, extra = {}) {
+    if (!id) return;
+    writeRun(id, { state, finishedAt: Date.now(), ...extra });
+}
+
 // ------------------------------------------------------------------------------ child processes
 
 // Every CLI still running under this server. A delegated run outlives nothing: whatever ends it —
@@ -788,12 +868,20 @@ async function prepare(params) {
     const refused = await preflight(env, model, profile);
     if (refused) throw new Error(`the "${profile}" provider refused a test call, so the task was not started — ${refused}`);
 
+    // The id is chosen here rather than read out of the result, which is what makes a run watchable
+    // while it runs: the CLI writes <projects>/<slug>/<id>.jsonl under exactly this id, so the host
+    // can tail it from the first turn instead of learning the id once everything is already over. A
+    // resumed run already has one — passing --session-id alongside --resume would be two answers to
+    // the same question.
+    const liveSession = session || randomUUID();
+
     const args = ['-p', '--output-format', 'json', '--model', model, ...MODES[mode]];
     if (params.effort) args.push('--effort', String(params.effort));
     if (params.agent) args.push('--agent', String(params.agent));
     if (session) args.push('--resume', session);
+    else args.push('--session-id', liveSession);
 
-    return { profile, prompt, mode, cwd, timeout, model, session, bin, env, args, depth };
+    return { profile, prompt, mode, cwd, timeout, model, session, liveSession, bin, env, args, depth };
 }
 
 async function execute(ctx, task) {
@@ -801,6 +889,7 @@ async function execute(ctx, task) {
     log('run', { profile, mode, model, session: session || null, cwd, depth: ctx.depth, background: !!task });
 
     const startedAt = Date.now();
+    const run = openRun(ctx);
     const child = spawn(bin, args, { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     running.add(child);
     if (task) task.child = child;
@@ -838,10 +927,18 @@ async function execute(ctx, task) {
     running.delete(child);
     if (task) task.child = null;
 
-    if (outcome.spawnError) throw new Error(`could not start the CLI (${bin}): ${outcome.spawnError}`);
-    if (task?.stopped) throw new Error(`the "${profile}" agent was stopped after ${span(Date.now() - startedAt)}`);
-    if (outcome.timedOut)
+    if (outcome.spawnError) {
+        closeRun(run, 'failed', { error: outcome.spawnError });
+        throw new Error(`could not start the CLI (${bin}): ${outcome.spawnError}`);
+    }
+    if (task?.stopped) {
+        closeRun(run, 'stopped');
+        throw new Error(`the "${profile}" agent was stopped after ${span(Date.now() - startedAt)}`);
+    }
+    if (outcome.timedOut) {
+        closeRun(run, 'timeout');
         throw new Error(`the "${profile}" agent was killed after ${Math.round(timeout / 1000)}s${stderr ? `: ${stderr.slice(-500)}` : ''}`);
+    }
 
     let payload = null;
     try {
@@ -850,12 +947,24 @@ async function execute(ctx, task) {
 
     if (!payload) {
         const detail = (stderr || stdout).trim().slice(-800);
+        closeRun(run, 'failed', { error: detail || `exit ${outcome.code}` });
         throw new Error(`the "${profile}" agent produced no result (exit ${outcome.code})${detail ? `: ${detail}` : ''}`);
     }
 
     recordHealth(profile, { ok: !payload.is_error, model, via: 'run' });
     recordBinding(payload.session_id, profile);
     recordSession(payload.session_id, { profile, cwd, model, mode, turns: payload.num_turns ?? null });
+
+    // The id the CLI reports wins over the one that was asked for: --session-id is a request, and a
+    // run that forked or was resumed can legitimately answer with another. Closing the wrong manifest
+    // would leave the frame spinning on a run that already ended.
+    const finalRun = payload.session_id || run;
+    if (finalRun !== run) closeRun(run, 'done', { session: finalRun });
+    closeRun(finalRun, payload.is_error ? 'failed' : 'done', {
+        session: finalRun,
+        turns: payload.num_turns ?? null,
+        tokens: formatTokens(usageTotals(payload)),
+    });
 
     const text = typeof payload.result === 'string' ? payload.result : JSON.stringify(payload.result ?? '');
     if (payload.is_error) throw new Error(`the "${profile}" agent reported an error — ${text.slice(0, 800)}`);
@@ -1215,6 +1324,7 @@ export {
     TOOLS,
     callTool,
     handle,
+    prepare,
     envForProfile,
     describeProfile,
     describeHealth,
