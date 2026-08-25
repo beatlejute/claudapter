@@ -1167,6 +1167,10 @@
         var stamp = meta.note + '|' + String(events.length) + '|' + (events.length ? JSON.stringify(events[events.length - 1]) : '');
         if (body.dataset.ccxStamp === stamp) return;
         body.dataset.ccxStamp = stamp;
+        // Temporary diagnostic on the channel the model indicator already uses. A frame that renders
+        // correctly in a harness and wrongly in the real page is a difference only the real page can
+        // report, and guessing at it from a screenshot has already cost two rounds.
+        reportFrame(id, open, meta, events);
         var atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
         body.textContent = '';
         if (!events.length) {
@@ -1186,6 +1190,25 @@
         // Only follow the tail for a reader who was already at it. Someone who scrolled back to read
         // an earlier line in a live frame should not be yanked forward by the next one.
         if (atBottom) body.scrollTop = body.scrollHeight;
+    }
+
+    // Compact by construction: kind tallies and the first few rendered rows, never the text itself —
+    // an agent's transcript is not something to copy into a log file.
+    function reportFrame(id, open, meta, events) {
+        try {
+            var kinds = {};
+            for (var i = 0; i < events.length; i++) kinds[events[i].k] = (kinds[events[i].k] || 0) + 1;
+            var rows = [];
+            for (var j = 0; j < events.length && rows.length < 8; j++) {
+                var line = eventLine(events[j]);
+                if (line) rows.push(line.cls.replace('ccx-agent-', '') + ':' + (line.text || '').slice(0, 24));
+            }
+            send({
+                type: 'ccx:debug',
+                reason: 'agentFrame',
+                dump: { id: id, open: open, state: meta.state, note: meta.note, total: events.length, kinds: kinds, rows: rows },
+            });
+        } catch (e) {}
     }
 
     function dropFrame(host) {
