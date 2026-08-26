@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.245**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. 2.1.245 broke two more, for a reason with no precedent in this file: it is the first release to put `$`-prefixed names into `extension.js`, which cost #2 its `\w+` identifier classes and #1 its literal anchor outright (see "CSP and loading your own script"). So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.246**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. 2.1.245 broke two more, for a reason with no precedent in this file: it is the first release to put `$`-prefixed names into `extension.js`, which cost #2 its `\w+` identifier classes and #1 its literal anchor outright (see "CSP and loading your own script"). 2.1.246 cost nothing again, which is worth saying out loud because it is the release that deleted the whole model catalogue from `extension.js` — `provider_ids`, `knowledge_cutoff`, `effort_cost_index` and every `display_name` are gone from the extension and live only in the CLI binary now (see "The CLI does not remap `claude-fable-5`"). Nothing here reads them, so nothing moved. So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -60,6 +60,7 @@ Every identifier there is a minified local, and the minifier reshuffles them rel
 | 2.1.231–2.1.235 | `f.env=v;` | `;` |
 | 2.1.238–2.1.241 | `h.env=y;` | `;` |
 | 2.1.245 | `q.env=Z;` | `;` |
+| 2.1.246 | `N.env=D;` | `;` |
 
 2.1.227 is the one that changed the **shape**, not just the names. Up to 2.1.226 the three assignments were the condition of an `if`, with the node path as the last operand of the comma expression:
 
@@ -183,7 +184,7 @@ never by membership — grepping for `claude-desktop` and eyeballing the arrays 
 answer. Through 2.1.229 the settings filter is still `BLc`, consulted via `wj()`, and still excludes
 `claude-vscode`, so the warning stands.
 
-### The CLI does not remap `claude-fable-5` (2.1.232, still in 2.1.233)
+### The CLI does not remap `claude-fable-5` (2.1.232, still in 2.1.246)
 
 Fable shipped as a model but not as a *family* in the two places the CLI remaps a requested model onto
 the `ANTHROPIC_DEFAULT_*_MODEL` env vars. In `resources/native-binary/claude.exe`:
@@ -201,8 +202,29 @@ elsewhere (`latest_per_family:{fable:"claude-fable-5", …}`). So `claude-opus-5
 `profileModelRules` — i.e. only for profiles routed through `127.0.0.1:8787` (codex/openai). Direct
 providers (`qwen`, `deepseek`, `glm`, `minimax`) send `claude-fable-5` verbatim and get a 400.
 
-Decision: not worked around — waiting on an upstream fix. Re-check `t5p`/`Rci` in the CLI bundle on
+Decision: not worked around — waiting on an upstream fix. Re-check both sites in the CLI bundle on
 each version bump; the day `fable:` appears in that `r` object, the direct providers recover it for free.
+
+2.1.246 is where this got easier to check and no closer to fixed. The extension stopped shipping its
+own copy of the catalogue entirely — `claude-opus` occurrences in `extension.js` fell 177 → 35, every
+`display_name`, `provider_ids`, `knowledge_cutoff` and `effort_cost_index` went to zero, and the CLI
+binary is the only place any of it exists now. Both remap sites survived the move unchanged, under
+new minified names (`t5p` → `EPn`, and `Rci` is now the `l` beside the family table):
+
+```js
+function EPn(e){let t=nP(e)?.family,
+  n={opus:V.ANTHROPIC_DEFAULT_OPUS_MODEL,sonnet:V.ANTHROPIC_DEFAULT_SONNET_MODEL,haiku:V.ANTHROPIC_DEFAULT_HAIKU_MODEL}, …}
+function R(e){return{sonnet:{envVarPriority:["ANTHROPIC_DEFAULT_SONNET_MODEL"],defaultKey:E},
+  opus:{envVarPriority:["ANTHROPIC_DEFAULT_OPUS_MODEL"],defaultKey:e},
+  haiku:{envVarPriority:["ANTHROPIC_SMALL_FAST_MODEL","ANTHROPIC_DEFAULT_HAIKU_MODEL"],defaultKey:M}}}
+function l(e){if(e.startsWith("sonnet"))return"sonnet";if(e.startsWith("opus"))return"opus";if(e.startsWith("haiku"))return"haiku";return}
+```
+
+Still three families in all three places, still no `fable`, even though `ANTHROPIC_DEFAULT_FABLE_MODEL`
+has been a recognised settings key since well before this release (58 hits in the 2.1.245 binary) and
+`latest_per_family` still names `fable:"claude-fable-5"` right beside the three that do remap. The gap
+is in the family tables, not in the catalogue, so the move changes nothing about the workaround status:
+direct providers still get `claude-fable-5` verbatim.
 
 ### The session is not reachable from the context object
 
