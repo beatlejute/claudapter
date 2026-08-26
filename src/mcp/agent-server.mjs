@@ -255,6 +255,20 @@ async function ensureProxy(profile) {
 // connect proves nothing the real run will not find out for itself, and must not stop it.
 const PREFLIGHT_TIMEOUT_MS = 8000;
 
+// Which route the probe takes. Plain fetch() ignores HTTPS_PROXY: left to its own devices the probe
+// rides the direct network path while the run it vouches for rides the configured proxy — and
+// behind a filtering gateway that difference is the whole answer, because the gateway answers the
+// probe with a refusal of its own that no provider ever sent. When the run's environment declares a
+// proxy, the request is therefore handed to a re-executed copy of this file (PROBE_CHILD_FLAG)
+// started with --use-env-proxy — the same treatment ensureProxy above gives processes whose fetch
+// must honor those variables. Loopback endpoints skip the child: nothing on 127.0.0.1 has any use
+// for a corporate proxy, and the tests themselves serve the probe from exactly there.
+const PROXY_VARS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy'];
+const PROBE_CHILD_FLAG = '--probe-child';
+// The child inherits the fetch timeout plus room for node itself to start; a slow spawn must never
+// read as a provider refusal.
+const PROBE_CHILD_GRACE_MS = 5000;
+
 // The adapter wraps an upstream refusal as `upstream 429: {…}`, so the body is JSON with a sentence
 // in front of it. Dig the object out of whichever shape arrived.
 function embeddedJson(body) {
@@ -374,37 +388,149 @@ async function preflight(env, requestedModel, profile) {
     const model = probeModel(env, requestedModel);
     if (!model) return null;
 
-    try {
-        const res = await fetch(`${base}/v1/messages`, {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-                'x-api-key': key,
-                authorization: `Bearer ${key}`,
-                'anthropic-version': '2023-06-01',
-            },
-            body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
-            signal: AbortSignal.timeout(PREFLIGHT_TIMEOUT_MS),
-        });
-        if (res.ok) {
-            recordHealth(profile, { ok: true, model });
-            return null;
-        }
-        const body = await res.text().catch(() => '');
-        recordHealth(profile, {
-            ok: false,
-            status: res.status,
-            message: providerMessage(body),
-            resets_at: parseResetAt(body, res.headers),
-            model,
-        });
-        return `HTTP ${res.status} — ${providerMessage(body)}`;
-    } catch (e) {
-        // Recorded but never returned: an endpoint that did not answer in eight seconds proves
-        // nothing the real run will not find out for itself, so it must not refuse the run — but a
-        // listing that says nothing at all about it would read as "fine".
-        recordHealth(profile, { ok: false, unreachable: true, message: e?.message || 'no answer', model });
+    const verdict = await probeOnce(
+        env,
+        `${base}/v1/messages`,
+        {
+            'content-type': 'application/json',
+            'x-api-key': key,
+            authorization: `Bearer ${key}`,
+            'anthropic-version': '2023-06-01',
+        },
+        JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+    );
+
+    if (verdict.unreachable) {
+        recordHealth(profile, { ok: false, unreachable: true, message: verdict.message || 'no answer', model });
         return null;
+    }
+    if (verdict.status >= 200 && verdict.status < 300) {
+        recordHealth(profile, { ok: true, model });
+        return null;
+    }
+    const text = verdict.body || '';
+    const retryAfter = { get: (name) => (String(name).toLowerCase() === 'retry-after' ? verdict.retry_after || null : null) };
+    recordHealth(profile, {
+        ok: false,
+        status: verdict.status,
+        message: providerMessage(text),
+        resets_at: parseResetAt(text, retryAfter),
+        model,
+    });
+    return `HTTP ${verdict.status} — ${providerMessage(text)}`;
+}
+
+// Where the probe request actually goes out. A run whose environment declares a proxy must be
+// probed through it — see the PROXY_VARS comment above. Loopback endpoints never take the child:
+// nothing local has any use for a corporate proxy, and the test suite serves the probe from
+// 127.0.0.1.
+function loopbackHost(url) {
+    try {
+        return ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(new URL(url).hostname);
+    } catch {
+        return false;
+    }
+}
+
+async function probeOnce(env, url, headers, body) {
+    if (!PROXY_VARS.some((n) => env[n]) || loopbackHost(url)) {
+        try {
+            const res = await fetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(PREFLIGHT_TIMEOUT_MS) });
+            return {
+                status: res.status,
+                body: await res.text().catch(() => ''),
+                retry_after: res.headers.get('retry-after'),
+            };
+        } catch (e) {
+            return { unreachable: true, message: e?.message || 'no answer' };
+        }
+    }
+    return probeThroughChild(env, url, headers, body);
+}
+
+// One request, answered by a fresh `node --use-env-proxy` copy of this file (PROBE_CHILD_FLAG).
+// The spec travels over stdin rather than argv so the credentials stay out of process listings,
+// and the single JSON line back carries just what preflight maps into health records and refusal
+// text: status, body, retry-after.
+function probeThroughChild(env, url, headers, body) {
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (verdict) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(verdict);
+        };
+        const timer = setTimeout(() => {
+            killTree(child);
+            finish({ unreachable: true, message: 'the probe did not answer in time' });
+        }, PREFLIGHT_TIMEOUT_MS + PROBE_CHILD_GRACE_MS);
+
+        const self = fileURLToPath(import.meta.url);
+        const child = spawn(process.execPath, ['--use-env-proxy', self, PROBE_CHILD_FLAG], {
+            env,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            windowsHide: true,
+        });
+        let out = '';
+        let err = '';
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (c) => (out += c));
+        child.stderr.on('data', (c) => (err += c));
+        // A child that dies before reading the spec breaks this pipe under the write; without a
+        // listener that EPIPE would take the whole server down with it.
+        child.stdin.on('error', () => {});
+        child.stdin.end(JSON.stringify({ url, headers, body, timeout_ms: PREFLIGHT_TIMEOUT_MS }));
+        child.once('error', (e) => finish({ unreachable: true, message: e.message }));
+        child.once('close', () => {
+            let verdict = null;
+            const line = out.split('\n').find((l) => l.trim());
+            try {
+                verdict = line ? JSON.parse(line) : null;
+            } catch {}
+            if (verdict && (typeof verdict.status === 'number' || verdict.unreachable)) return finish(verdict);
+            // An older node without --use-env-proxy refuses to start at all; probing directly beats
+            // reporting every provider unreachable forever.
+            if (/bad option|invalid option/i.test(err)) return probeOnce({}, url, headers, body).then(finish);
+            log('probe child produced no verdict', err.slice(0, 200));
+            finish({ unreachable: true, message: err.trim().slice(0, 200) || 'no verdict from the probe' });
+        });
+    });
+}
+
+// The other end of probeThroughChild: this same file under --probe-child, one spec on stdin, one
+// JSON verdict on stdout. The caller starts it with --use-env-proxy, which is the entire point —
+// this process's fetch honors the proxy variables the real run will honor.
+async function probeChildMain() {
+    const spec = await new Promise((resolve) => {
+        let buffer = '';
+        process.stdin.setEncoding('utf8');
+        process.stdin.on('data', (c) => (buffer += c));
+        process.stdin.on('end', () => resolve(buffer));
+        process.stdin.on('error', () => resolve(''));
+    });
+    const done = (verdict) => process.stdout.write(`${JSON.stringify(verdict)}\n`);
+    let parsed;
+    try {
+        parsed = JSON.parse(spec);
+    } catch {
+        return done({ unreachable: true, message: 'unreadable probe spec' });
+    }
+    try {
+        const res = await fetch(parsed.url, {
+            method: 'POST',
+            headers: parsed.headers,
+            body: parsed.body,
+            signal: AbortSignal.timeout(Number(parsed.timeout_ms) || PREFLIGHT_TIMEOUT_MS),
+        });
+        done({
+            status: res.status,
+            body: await res.text().catch(() => ''),
+            retry_after: res.headers.get('retry-after'),
+        });
+    } catch (e) {
+        done({ unreachable: true, message: e?.message || 'no answer' });
     }
 }
 
@@ -1327,7 +1453,10 @@ function main() {
 }
 
 const isEntrypoint = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isEntrypoint) main();
+if (isEntrypoint) {
+    if (process.argv.includes(PROBE_CHILD_FLAG)) await probeChildMain();
+    else main();
+}
 
 export {
     TOOLS,

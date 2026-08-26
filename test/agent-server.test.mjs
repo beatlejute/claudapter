@@ -205,7 +205,7 @@ async function main() {
     //     15 minutes later. Both shapes seen in the wild are covered: Anthropic-style
     //     {error:{message}} (z.ai, the ChatGPT adapter) and a bare {message} (Alibaba).
     let reply = { status: 200, body: '{"content":[]}' };
-    const provider = http.createServer((req, res) => {
+    const handleProbeRequest = (req, res) => {
         let body = '';
         req.on('data', (c) => (body += c));
         req.on('end', () => {
@@ -213,9 +213,17 @@ async function main() {
             res.writeHead(reply.status, { 'content-type': 'application/json' });
             res.end(reply.body);
         });
-    });
+    };
+    const provider = http.createServer(handleProbeRequest);
     let probed = null;
     await new Promise((r) => provider.listen(0, '127.0.0.1', r));
+    // A twin of the provider server bound on every interface, so the routed-probe tests can reach
+    // it under 127.0.0.2 — an address loopbackHost() does not exempt, which is what sends those
+    // probes through a proxy. (Loopback /8 works on Windows and Linux; on macOS this twin would
+    // need an alias, and these two cases would need to be skipped there.)
+    const wide = http.createServer(handleProbeRequest);
+    await new Promise((r) => wide.listen(0, r));
+    const widePort = wide.address().port;
     const providerEnv = {
         ANTHROPIC_BASE_URL: `http://127.0.0.1:${provider.address().port}`,
         ANTHROPIC_AUTH_TOKEN: 'sk-test',
@@ -258,6 +266,30 @@ async function main() {
     reply = { status: 400, body: 'not json at all' };
     assert.match(await preflight(providerEnv, 'haiku'), /HTTP 400 — not json at all/, 'an unparseable body is passed through verbatim');
 
+    // --- the probe takes the route the run will take. A declared proxy applies to the probe too —
+    //     plain fetch() would ignore it, and behind a filtering gateway the direct route draws a
+    //     refusal no provider ever sent. Loopback endpoints are the exception: nothing local has
+    //     any use for a corporate proxy, and this suite serves the probe from 127.0.0.1.
+    const proxiedEnv = {
+        ...providerEnv,
+        ANTHROPIC_BASE_URL: `http://127.0.0.2:${widePort}`,
+        HTTPS_PROXY: 'http://127.0.0.1:9',
+        HTTP_PROXY: 'http://127.0.0.1:9',
+    };
+
+    // nothing on the loopback needs a proxy: even with one declared, the request must not be routed
+    probed = null;
+    await preflight({ ...providerEnv, HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9' }, 'haiku');
+    assert.strictEqual(probed.max_tokens, 1, 'a loopback endpoint is probed directly even under a declared proxy');
+
+    // a non-loopback target whose proxy cannot be reached cannot be asked at all
+    await preflight(proxiedEnv, 'haiku', 'routed-dead');
+    assert.match(
+        describeHealth('routed-dead'),
+        /no answer .*did not respond/,
+        'a proxy that cannot be reached is recorded as unanswered, never as a refusal',
+    );
+    assert.strictEqual(await preflight(proxiedEnv, 'haiku'), null, 'an unanswered route does not block the run');
     // the refusal reaches the caller as the reason the task never started. The profile has to map
     // the default (sonnet) family, or the probe would decline to guess and let the run proceed.
     writeProfile('broken', { env: { ...providerEnv, ANTHROPIC_DEFAULT_SONNET_MODEL: 'mid-model' } });
@@ -272,6 +304,7 @@ async function main() {
     assert.strictEqual(await preflight({}, 'sonnet'), null, 'the subscription profile is never probed');
 
     provider.close();
+    wide.close();
     assert.strictEqual(providerMessage('{"error":{"message":"deep"}}'), 'deep');
     assert.strictEqual(providerMessage('{"message":"flat"}'), 'flat');
     // the adapter hands an upstream refusal on with a sentence in front of the JSON
