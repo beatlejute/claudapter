@@ -414,6 +414,77 @@ function transcriptExists(sessionId) {
     return transcriptPathFor(sessionId) !== null;
 }
 
+// --- A message id from another provider closes the way back ---------------------------------
+//
+// The CLI sends `diagnostics: {previous_message_id: <id of the previous answer>}` — its own
+// prompt-cache-break diagnosis — and only when the request goes to Anthropic. The id is read off
+// the transcript, so a tab that answered on someone else's backend carries that provider's id
+// shape: OpenRouter hands out `gen-1787815743-…`. Switch such a session back to Anthropic and
+// every turn dies on
+//   400 diagnostics.previous_message_id: must be the `id` from a prior /v1/messages response
+//       (starts with `msg_`)
+// with no answer at all. There is no retry without the field — the CLI only classifies the failure
+// as `previous_message_id_invalid` — and relaunching does not clear it, because the id comes back
+// off disk. From Anthropic the session is then unreachable for good.
+//
+// The CLI builds the field as `previous_message_id: u ?? null` and null is accepted, so dropping
+// `message.id` is enough. Only ids no Anthropic endpoint could have issued are touched, only on the
+// spawn that is actually going to Anthropic, and every other line is written back byte for byte.
+const ANTHROPIC_HOST = /^https?:\/\/api\.anthropic\.com(?:[:\/]|$)/i;
+
+// Where this spawn's requests will land. A profile that brings its own routing answers for itself;
+// one with an empty env is the Anthropic subscription and inherits, so the ambient environment and
+// settings.json decide — the same layering the CLI itself applies.
+function targetsAnthropic(profile, baseEnv) {
+    const url =
+        profile && crossesProvider(profile)
+            ? profileEnv(profile).ANTHROPIC_BASE_URL || ''
+            : currentEnv().ANTHROPIC_BASE_URL || (baseEnv && baseEnv.ANTHROPIC_BASE_URL) || '';
+    return !url || ANTHROPIC_HOST.test(url);
+}
+
+// Rewritten in place rather than through a temp file and a rename: on Windows a rename over a path
+// the CLI still holds open fails outright, and this runs in the gap between the old process going
+// away and the new one starting.
+function stripForeignMessageIds(sessionId) {
+    const file = transcriptPathFor(sessionId);
+    if (!file) return 0;
+    let lines;
+    try {
+        lines = fs.readFileSync(file, 'utf8').split('\n');
+    } catch {
+        return 0;
+    }
+    let stripped = 0;
+    const out = lines.map((line) => {
+        if (!line.includes('"assistant"')) return line;
+        let row;
+        try {
+            row = JSON.parse(line);
+        } catch {
+            return line; // a partially written trailing line while the CLI is mid-append
+        }
+        const message = row && row.type === 'assistant' ? row.message : null;
+        if (!message || typeof message.id !== 'string' || message.id.startsWith('msg_')) return line;
+        delete message.id;
+        stripped++;
+        return JSON.stringify(row);
+    });
+    if (!stripped) return 0;
+    try {
+        fs.writeFileSync(file, out.join('\n'), 'utf8');
+    } catch (e) {
+        console.error('ccx: could not strip foreign message ids', e);
+        return 0;
+    }
+    // Both caches key on mtime+size and would otherwise keep serving the pre-strip bytes
+    S.transcriptTextCache && S.transcriptTextCache.delete(sessionId);
+    S.transcriptTimeCache && S.transcriptTimeCache.delete(sessionId);
+    dlog('foreign message ids stripped', { session: sessionId, lines: stripped });
+    console.log(`ccx: dropped ${stripped} foreign message id(s) from ${sessionId} before an Anthropic spawn`);
+    return stripped;
+}
+
 // --- Live view of a delegated agent ---------------------------------------------------------
 //
 // A run started through the claudapter MCP server is a separate `claude -p` process: it says nothing
@@ -708,6 +779,9 @@ function envFor(baseEnv, resumeSessionId, opts) {
         resumeSessionId = undefined;
     }
     const profile = S.pendingProfile || getBinding(resumeSessionId);
+    // Ahead of the early return, because a tab with no profile at all is the plainest way back to
+    // Anthropic — and the one that would otherwise keep failing with nothing in the log to explain it.
+    if (resumeSessionId && targetsAnthropic(profile, baseEnv)) stripForeignMessageIds(resumeSessionId);
     if (!profile) return baseEnv;
     const env = { ...baseEnv };
     for (const k of managedKeys()) delete env[k];

@@ -27,6 +27,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Profile picker** — reads `~/.claude/profiles/*.json` and lists each profile with its model.
 - **Per-tab switching** — the `claude` process restarts on the same channel with `resume`, so the conversation history survives. Other tabs are untouched. On a tab that has not sent anything yet there is nothing to resume, so it starts fresh instead — the toast says which.
 - **Compact before switching** — on a tab with history the switch first asks *Compact & switch* / *Switch as is*. The prompt cache never survives a provider change, so the first turn on the new backend pays for the whole transcript either way; sending the compact summary instead of the raw history is what makes it cheaper, and it keeps a long conversation inside a smaller window on the other side. It is a question, not a default — compaction discards detail. Left unanswered it switches as is; if the compaction never reports back it switches as is after 90 s. A tab with nothing to compact is never asked.
+- **Switching back to Anthropic keeps working.** The CLI feeds the previous answer's id back to Anthropic as `diagnostics.previous_message_id`, and an id minted by another provider (OpenRouter's `gen-1787815743-…`) is rejected with a `400` — every turn, forever, because the id is re-read from the transcript on each relaunch. A session that had answered elsewhere was simply unreachable from Anthropic. The spawn that goes to Anthropic now drops those ids from the transcript first; ids Anthropic itself issued are left alone, and so is every spawn going anywhere else.
 - **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
 - **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
 - **Pinned sessions** — hover a row in the session history and click the pin: it moves to the top of the list and stays there, above everything else, however old it gets. A search still applies — a pinned row that no longer matches is filtered out like any other, and the ones that do match keep their place at the front. The pins live in `~/.claude/claudapter/pinned.json` and are shared by every tab.
@@ -611,7 +612,7 @@ When adapting to a new release: verify the signatures against it, bump `package.
 
 ## Diagnostics
 
-`~/.claude/claudapter/debug.log` records `launch_claude`, `ccx:apply` and `envFor` (profile, session, `ANTHROPIC_BASE_URL`).
+`~/.claude/claudapter/debug.log` records `launch_claude`, `ccx:apply` and `envFor` (profile, session, `ANTHROPIC_BASE_URL`), plus `resume dropped` and `foreign message ids stripped` whenever a spawn had to repair what it was handed.
 
 To confirm a provider really took effect, look at **Output → Claude VSCode**: the spawn logs `ccx: spawning with profile "…"`, and the CLI itself prints the `ANTHROPIC_BASE_URL` it resolved.
 

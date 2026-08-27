@@ -428,6 +428,35 @@ Reading the text back out was the subtler half of the bug: `messages.value` entr
 
 `Switch model… → <model>` in the command menu is the extension's own `modelIndicator`, fed by `session.lastServedModel`. That signal is written in `processMessage` from `e.message.model` on every assistant turn — and `loadFromMessages` runs `processMessage` over the whole transcript while seeding a resume, before the CLI has said a word. So after a provider switch the menu says, truthfully but misleadingly, which model the *old* provider answered with, until the new one answers. The stock reset is in the `system/init` branch and fires only when `session_id` changes, which a `--resume` never does. `performRestart` therefore clears `lastServedModel.value` on every switch, so the menu falls back to the selection.
 
+### A foreign `previous_message_id` closes the way back to Anthropic (2.1.247)
+
+Every request the CLI builds can carry one diagnostic field:
+
+```js
+...Ie && p && Se && !S_ ? { diagnostics: { previous_message_id: u ?? null } } : {}
+```
+
+`u` is the id of the answer before this one, read back off the transcript (`message.id`), and the field is its prompt-cache-break diagnosis — the same machinery behind `tengu_prompt_cache_diagnosis_received` and the `[PROMPT CACHE BREAK]` warning. The conditions restrict it to Anthropic, which is exactly why it never shows up while a tab is running on someone else's backend: it is the *return* that breaks.
+
+An id from another provider does not have Anthropic's shape. OpenRouter answers with `gen-1787815743-Wd0oDf0iH9SHXerqJ6DS`, and sending that back gets
+
+```
+400 diagnostics.previous_message_id: must be the `id` from a prior /v1/messages response (starts with `msg_`)
+```
+
+Nothing recovers from it. The CLI knows the failure by name but only to label it:
+
+```js
+if (e instanceof xn && e.status === 400 && e.message.includes("diagnostics.previous_message_id"))
+    return "previous_message_id_invalid";
+```
+
+— a telemetry classification, not a retry. And since `u` is read from the `.jsonl`, relaunching the channel reproduces it: the session answers `400` to every turn from Anthropic, forever, while the same session on the old provider still works. In the run that turned this up (openrouter → claude) two turns died this way three minutes apart, one of them after a full process restart, and the tab had to be abandoned.
+
+`envFor` therefore strips the offending ids from the transcript before the spawn (`stripForeignMessageIds`), and only when that spawn is the one going to Anthropic (`targetsAnthropic`: the profile's own `ANTHROPIC_BASE_URL` when it brings routing of its own, otherwise `settings.json` then the ambient environment — the CLI's own layering). `previous_message_id: u ?? null` accepts null, so deleting `message.id` is the whole repair; an id that already starts with `msg_` is left in place, and so is every line that is not an assistant turn — including a half-written trailing one, which is why each line is parsed on its own and written back verbatim unless it is the one being fixed.
+
+This is the only place claudapter writes into a file the CLI owns. It rewrites in place rather than through a temp file and a rename, because on Windows a rename over a path the CLI still holds open fails outright, and it runs in the gap between the old process going away and the new one starting. The content-search and timestamp caches key on mtime+size, so both are dropped for that session afterwards.
+
 ### Menu ordering
 
 The command registry (`class AX` in `webview/index.js`) sorts each section by a hard-coded id list; unknown ids fall to the end:
