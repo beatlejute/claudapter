@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.246**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. 2.1.245 broke two more, for a reason with no precedent in this file: it is the first release to put `$`-prefixed names into `extension.js`, which cost #2 its `\w+` identifier classes and #1 its literal anchor outright (see "CSP and loading your own script"). 2.1.246 cost nothing again, which is worth saying out loud because it is the release that deleted the whole model catalogue from `extension.js` — `provider_ids`, `knowledge_cutoff`, `effort_cost_index` and every `display_name` are gone from the extension and live only in the CLI binary now (see "The CLI does not remap `claude-fable-5`"). Nothing here reads them, so nothing moved. So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.247**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#8 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. 2.1.245 broke two more, for a reason with no precedent in this file: it is the first release to put `$`-prefixed names into `extension.js`, which cost #2 its `\w+` identifier classes and #1 its literal anchor outright (see "CSP and loading your own script"). 2.1.246 cost nothing again, which is worth saying out loud because it is the release that deleted the whole model catalogue from `extension.js` — `provider_ids`, `knowledge_cutoff`, `effort_cost_index` and every `display_name` are gone from the extension and live only in the CLI binary now (see "The CLI does not remap `claude-fable-5`"). Nothing here reads them, so nothing moved. 2.1.247 cost nothing either — three releases in a row now — and its own diff is git-invocation hardening, a usage-limit grace banner behind an experiment gate (see "The usage-limit banner has a second tenant") and two spinner-tips settings. So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -184,7 +184,7 @@ never by membership — grepping for `claude-desktop` and eyeballing the arrays 
 answer. Through 2.1.229 the settings filter is still `BLc`, consulted via `wj()`, and still excludes
 `claude-vscode`, so the warning stands.
 
-### The CLI does not remap `claude-fable-5` (2.1.232, still in 2.1.246)
+### The CLI does not remap `claude-fable-5` (2.1.232, still in 2.1.247)
 
 Fable shipped as a model but not as a *family* in the two places the CLI remaps a requested model onto
 the `ANTHROPIC_DEFAULT_*_MODEL` env vars. In `resources/native-binary/claude.exe`:
@@ -225,6 +225,13 @@ has been a recognised settings key since well before this release (58 hits in th
 `latest_per_family` still names `fable:"claude-fable-5"` right beside the three that do remap. The gap
 is in the family tables, not in the catalogue, so the move changes nothing about the workaround status:
 direct providers still get `claude-fable-5` verbatim.
+
+Re-checked on the 2.1.247 binary: both sites are still there and still three families wide — one
+`{opus:V.ANTHROPIC_DEFAULT_OPUS_MODEL,sonnet:V.…,haiku:V.…}` object (one hit in 241 MB) and one
+`startsWith` chain, with `startsWith("fable")` at zero hits anywhere in the file. `latest_per_family`
+still names `fable:"claude-fable-5"` and `ANTHROPIC_DEFAULT_FABLE_MODEL` is still a recognised settings
+key — 34 hits, down from 58 in 2.1.245, which is the catalogue move taking dead copies with it rather
+than the key going away. Nothing to change.
 
 ### The session is not reachable from the context object
 
@@ -374,6 +381,34 @@ panel does not show until groups are created.
 ### Compacting before a switch rides on the stock `/compact`
 
 The offer is a two-button toast; *Compact & switch* calls the page's own `session.send("/compact")` — the same thing the command menu's Compact entry does (`nn=()=>{i("/compact")}` in the composer). The CLI answers on the `io_message` stream with `{type:"system", subtype:"compact_boundary", compact_metadata:{trigger, pre_tokens}}`; the page already listens to that stream for `system/init`, so the boundary is the release for the restart. Two guards keep the switch from being held hostage: a boundary on another channel is ignored, and `COMPACT_WAIT_MS` (90 s) restarts uncompacted with a toast if none arrives. `send()` rejecting does the same at once. The offer itself is not asked when there is nothing to compact — no assistant turn yet, or a turn already running (`session.busy`) — and never on a fresh tab, which starts fresh with nothing to resume. `session.busy.value`, `session.messages.value` and `activeSession.value` are read off the app object the registry hook already hands over; none of them is patched.
+
+### The usage-limit banner has a second tenant (2.1.247)
+
+The auto-resume gesture tells a hard block from a soft notice by wording, because both render as
+`[class*="banner_"][data-color="warning"]` — "You've hit your …" gets the prompt, "Approaching …"
+and "You've used N% of …" do not. 2.1.247 adds a third possible text in that same slot.
+
+The session class grew `usageLimitGrace`, a `null | "covered" | "finishing" | "stopped" | "dismissed"`
+signal written by `setUsageLimitGrace(rateLimitInfo)` off the `rate_limit_event` stream. The render
+reads it only through an experiment gate — `config.experimentGates.tengu_lantern_sconce===!0` — and
+when it is set, its message takes precedence over the stock one:
+
+```js
+C0 = gate ? session.usageLimitGrace.value : null
+r0 = C0 ? VA1(C0) : null          // "Usage limit reached · finishing up"
+                                  // "Usage limit reached · a little extra on us, then your credits"
+E2 = r0 ?? session.rateLimitWarning.value   // the stock "You've hit your …" only when r0 is null
+```
+
+Two things keep this from breaking anything. `VA1` returns `null` for `stopped` and `dismissed`, so the
+moment the limit actually blocks, `E2` falls back to the stock text and the wording match works as it
+always did. And `covered` renders `color:"normal"`, which the `[data-color="warning"]` selector does not
+even see. So the grace window is silent for claudapter — correct, since nothing is halted while the
+run is still allowed or still finishing.
+
+Worth recording anyway: this is the first stock change since the gesture was written that puts new
+text into the exact markup it reads, and the gate means it can switch on for an account without a new
+extension version.
 
 ### `send()` has no hidden-message flag — retract hides via the DOM
 

@@ -1,7 +1,7 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.246**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.247**.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -42,7 +42,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.246**; the signatures also match 2.1.220–2.1.245)
+- The `anthropic.claude-code` extension installed (verified against **2.1.247**; the signatures also match 2.1.220–2.1.246)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
@@ -406,6 +406,16 @@ The `data-color="warning"` banner carries two different notices, so wording is t
 "*Approaching* …" and "*You've used N% of* …" mean the run is still healthy and are left alone. The
 notice is hardcoded English in the bundle, so the text match holds in every `/config` language.
 
+Since 2.1.247 that warning banner has a second tenant. When the `tengu_lantern_sconce` experiment gate is on
+for the account and a rate-limit event arrives with `rateLimitGraceActive`, the session grows a
+`usageLimitGrace` state and its message *replaces* the stock one: "Usage limit reached · finishing up"
+while the turn is still running, or "Usage limit reached · a little extra on us, then your credits" when
+the overage is covered (that one renders `data-color="normal"`, not `warning`). Neither matches "You've
+hit your", so claudapter stays quiet through the grace window — which is the right answer, because
+nothing is halted there. Once the limit really blocks, the grace state goes to `stopped` and its message
+builder returns `null`, so the banner falls back to the stock "You've hit your …" and the prompt fires as
+before. Nothing to change, but it is the one stock feature that writes into markup claudapter reads.
+
 A request-level failure — `API Error: Request rejected (429) · upstream 429: {…usage_limit_reached…}` —
 arrives as an ordinary assistant turn whose text is the error, not as a banner, so the banner selector
 never sees it. Claudapter reads the newest turn from the transcript and matches its leading
@@ -571,7 +581,8 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 
 | Branch | Extension | What the minifier called the locals |
 |---|---|---|
-| `main` | 2.1.246 — newest | `N.env=D;`, `light:W,dark:W` |
+| `main` | 2.1.247 — newest | `N.env=F;`, `light:W,dark:W` |
+| `v2.1.247` | 2.1.247 | `N.env=F;`, `light:W,dark:W` |
 | `v2.1.246` | 2.1.246 | `N.env=D;`, `light:W,dark:W` |
 | `v2.1.245` | 2.1.245 | `q.env=Z;`, `light:W,dark:W` |
 | `v2.1.241` | 2.1.241 | `h.env=y;`, `light:s,dark:s` |
@@ -592,9 +603,9 @@ VS Code installs the new version into a separate folder, so the patch is gone. R
 | `v2.1.221` | 2.1.221 | `f.env=x,_)`, `light:a,dark:a` |
 | `v2.1.220` | 2.1.220 | `f.env=w,g)`, `light:a,dark:a` |
 
-One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. Both structural signatures are re-checked against every bundle still on disk at update time. VS Code garbage-collects retired extension folders, so the older ones eventually stop being verifiable locally — 2.1.220 through 2.1.226 were gone by the 2.1.228 update, and by 2.1.233 the sweep was 2.1.227 through 2.1.233 — at the 2.1.239 update only 2.1.235, 2.1.238 and 2.1.239 were still there, 2.1.241 joined that set without retiring any of it, the 2.1.245 update finally swept the rest, and by 2.1.246 only 2.1.245 and 2.1.246 are left. Their branches stay pinned to the commit that was verified against them.
+One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. Both structural signatures are re-checked against every bundle still on disk at update time. VS Code garbage-collects retired extension folders, so the older ones eventually stop being verifiable locally — 2.1.220 through 2.1.226 were gone by the 2.1.228 update, and by 2.1.233 the sweep was 2.1.227 through 2.1.233 — at the 2.1.239 update only 2.1.235, 2.1.238 and 2.1.239 were still there, 2.1.241 joined that set without retiring any of it, the 2.1.245 update finally swept the rest, and by 2.1.247 the set is 2.1.245, 2.1.246 and 2.1.247 — that update retired the first two without deleting them, so all three were still verifiable. Their branches stay pinned to the commit that was verified against them.
 
-Renames have now cost almost every signature at least once, and 2.1.245 is where they reached the two that had held out longest. 2.1.238 renamed the session list's `useRef` alias (`ge` → `_e`), the one hook alias injection point #6 still hardcoded. 2.1.239 renamed a helper injection point #4 reads through to `$b` — and since that signature spelled its identifiers `\w+`, which does not match a `$`, it fell to zero hits on a name it was not even capturing. 2.1.245 carried that same `$` into `extension.js` for the first time and took #1 and #2 with it: #2 spelled its locals `\w+` while the panel had become `$`, and #1 was still a plain literal naming three locals outright — the nonce, the bundle's own script URI, and the webview parameter the injected call is handed. All of them are fixed the same way, by capturing what was being spelled out; #1 now anchors on `getHtmlForWebview`, the one unminified name within reach. 2.1.227 is the other kind of break — it dropped the bundled-node fallback, which deleted the `if(…)` wrapper around #3 and left the assignment ending in `;` instead of `,<nodePath>)`. The signature now captures that terminator and echoes it back verbatim, so one pattern still covers every release in the table. 2.1.241 is the counter-example worth recording: all eight signatures matched it untouched, the first release since 2.1.234 to cost nothing at all. 2.1.246 is the second, and the more surprising one — it is the release that moved the entire model catalogue out of `extension.js` and into the CLI binary, and still every signature matched as written, because none of them reads that catalogue.
+Renames have now cost almost every signature at least once, and 2.1.245 is where they reached the two that had held out longest. 2.1.238 renamed the session list's `useRef` alias (`ge` → `_e`), the one hook alias injection point #6 still hardcoded. 2.1.239 renamed a helper injection point #4 reads through to `$b` — and since that signature spelled its identifiers `\w+`, which does not match a `$`, it fell to zero hits on a name it was not even capturing. 2.1.245 carried that same `$` into `extension.js` for the first time and took #1 and #2 with it: #2 spelled its locals `\w+` while the panel had become `$`, and #1 was still a plain literal naming three locals outright — the nonce, the bundle's own script URI, and the webview parameter the injected call is handed. All of them are fixed the same way, by capturing what was being spelled out; #1 now anchors on `getHtmlForWebview`, the one unminified name within reach. 2.1.227 is the other kind of break — it dropped the bundled-node fallback, which deleted the `if(…)` wrapper around #3 and left the assignment ending in `;` instead of `,<nodePath>)`. The signature now captures that terminator and echoes it back verbatim, so one pattern still covers every release in the table. 2.1.241 is the counter-example worth recording: all eight signatures matched it untouched, the first release since 2.1.234 to cost nothing at all. 2.1.246 is the second, and the more surprising one — it is the release that moved the entire model catalogue out of `extension.js` and into the CLI binary, and still every signature matched as written, because none of them reads that catalogue. 2.1.247 makes three in a row: its whole diff is git-invocation hardening, a usage-limit grace banner behind an experiment gate, and two spinner-tips settings, and no signature stands on any of it.
 
 When adapting to a new release: verify the signatures against it, bump `package.json`, this README and [docs/internals.md](docs/internals.md) on `main`, then tag the result with a fresh `v<version>` branch.
 
