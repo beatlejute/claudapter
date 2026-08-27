@@ -321,11 +321,17 @@
     // commands.
     function selectedModelLabel(model) {
         if (typeof model !== 'string' || !model.trim()) return 'Auto';
-        // the session signals carry the raw selection, context suffix and all ("opus[1m]") — the chip
-        // shows the family name, so the [1m]-style marker is stripped before the alias lookup
+        // the session signals carry raw ids, not labels: a selection is a family alias with the context
+        // suffix attached ("opus[1m]"), while the main loop reports a full id ("claude-opus-5[1m]",
+        // "claude-haiku-4-5-20251001"). The suffix is stripped, then the family is read out of an
+        // Anthropic id; anything else is another provider's own model name, which has no family to read
+        // and is the honest label for itself.
         var value = model.trim().replace(/\[[^\]]*\]$/, '').trim();
         var aliases = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable' };
-        return aliases[value.toLowerCase()] || value;
+        var exact = aliases[value.toLowerCase()];
+        if (exact) return exact;
+        var family = /^(?:[\w.]*anthropic[\w.]*\.)?claude-(opus|sonnet|haiku|fable)\b/i.exec(value);
+        return family ? aliases[family[1].toLowerCase()] : value;
     }
 
     function liveUltracode() {
@@ -346,11 +352,17 @@
         }
     }
 
-    // The model THIS chat is actually on: the explicit pick first, then what actually ran. settings.json
-    // is deliberately not consulted — its `model` is a global default, not this session's value, and
-    // surfacing it is exactly the "not this chat" complaint.
+    // The model THIS chat is actually on — which is not always the one that was picked. The CLI can
+    // serve something else (a limit or capacity downgrade), and `currentMainLoopModel` is the live
+    // process reporting what it is really running, so it goes first; leading with `modelSelection`
+    // showed `Opus` through a session whose main loop was `claude-fable-5`, which is the one case the
+    // chip exists for. The selection is the fallback for the window before the CLI has said anything,
+    // and `lastServedModel` comes last because a resume fills it by replaying the transcript, so it
+    // names the previous provider's model until the new one answers. settings.json is deliberately not
+    // consulted — its `model` is a global default, not this session's value, and surfacing it is
+    // exactly the "not this chat" complaint.
     function liveModel() {
-        var sources = ['modelSelection', 'lastServedModel', 'currentMainLoopModel'];
+        var sources = ['currentMainLoopModel', 'modelSelection', 'lastServedModel'];
         for (var i = 0; i < sources.length; i++) {
             var m = sessionField(sources[i]);
             if (typeof m === 'string' && m.trim() && m.trim() !== 'default' && m.trim() !== 'auto')

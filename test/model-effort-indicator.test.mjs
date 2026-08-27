@@ -76,15 +76,29 @@ assert.match(page, /anchor\.parent\.insertBefore\(indicator, anchor\.before\)/);
 assert.match(page, /flex:0 0 auto/);
 assert.match(page, /function liveModel\(\)/);
 assert.match(page, /function liveEffort\(\)/);
-// the model must come from THIS session's live signals (selection → last served → current loop),
-// never from the global settings default that names the wrong chat
-assert.match(page, /\['modelSelection', 'lastServedModel', 'currentMainLoopModel'\]/);
+// the model must come from THIS session's live signals (current loop → selection → last served),
+// never from the global settings default that names the wrong chat. The loop leads because the CLI can
+// serve a model other than the selected one and that field is the only one reporting the substitution
+assert.match(page, /\['currentMainLoopModel', 'modelSelection', 'lastServedModel'\]/);
 assert.match(page, /lastServedModel: sessionField\('lastServedModel'\)/);
 assert.doesNotMatch(page, /if \(!model \|\| model === 'default' \|\| model === 'auto'\) model = state\.selectedModel/);
 // the [1m] context suffix must not leak into the chip, and an ultracode selection must show as such
 assert.match(page, /function liveUltracode\(\)/);
 assert.match(page, /liveUltracode\(\) \? 'ultracode'/);
 assert.ok(page.includes(".replace(/\\[[^\\]]*\\]$/, '')"), 'the context suffix must be stripped');
+// with the main loop first the value arriving is a full id, not a family alias, so the label has to
+// read the family out of it — a bare alias table would print "claude-opus-5" into the chip
+const labelAt = page.indexOf('function selectedModelLabel(');
+const labelEnd = page.indexOf('\n    }', labelAt) + '\n    }'.length;
+const selectedModelLabel = new Function(`${page.slice(labelAt, labelEnd)}; return selectedModelLabel;`)();
+assert.equal(selectedModelLabel('opus[1m]'), 'Opus', 'a family alias must still resolve');
+assert.equal(selectedModelLabel('claude-opus-5[1m]'), 'Opus', 'a full id with a context suffix');
+assert.equal(selectedModelLabel('claude-fable-5'), 'Fable', 'the downgrade target must be named');
+assert.equal(selectedModelLabel('claude-haiku-4-5-20251001'), 'Haiku', 'a dated id');
+assert.equal(selectedModelLabel('us.anthropic.claude-sonnet-5-v1:0'), 'Sonnet', 'a bedrock-style id');
+assert.equal(selectedModelLabel('deepseek-v4-pro'), 'deepseek-v4-pro', 'another provider names itself');
+assert.equal(selectedModelLabel(''), 'Auto', 'nothing selected reads as Auto');
+
 assert.doesNotMatch(page, /document\.body\.appendChild\(indicator\)/);
 assert.doesNotMatch(page, /top:8px;right:8px;z-index:10005/);
 assert.match(page, /decorateModelAndEffort\(\);/);

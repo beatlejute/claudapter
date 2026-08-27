@@ -35,7 +35,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **A live frame under a subagent** — an `Agent`/`Task` call and a `run_agent` call both grow a small framed panel showing what the agent is doing while it does it: its prompt, the tools it reaches for, and what it is saying (in full where the page has the turns, as a running summary where it only has the progress feed). It opens itself while the run is going and folds away once the answer lands; click the header to keep it open. **Nothing it shows enters the parent conversation** — the tab's context stays the tool call and, at the end, the tool result. See [Watching a delegated run](#watching-a-delegated-run).
 - **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
 - **Local spellcheck with correction suggestions** — Russian words are checked locally with Hunspell. Misspellings receive a red wavy underline; right-click one to choose a correction. Only bounded, de-duplicated words leave the webview, and no draft text is sent over the network.
-- **Model and effort chip** — a small read-only chip in the composer's toolbar row, left of the mode picker: the model and reasoning effort this session is actually running (`Opus · xhigh`, or `· ultracode` when ultracode is selected). It reads the session's live signals, not `settings.json` — that file only holds the global defaults and would name the wrong chat.
+- **Model and effort chip** — a small read-only chip in the composer's toolbar row, left of the mode picker: the model and reasoning effort this session is actually running (`Opus · xhigh`, or `· ultracode` when ultracode is selected). It reads the session's live signals, not `settings.json` — that file only holds the global defaults and would name the wrong chat. *Actually running* is literal: when the CLI serves something other than what was picked, the chip names what answered.
 - **Send an image with no text** — attaching a file to an empty composer writes a short prompt into it (`Analyse the image in the context of this conversation`, agreeing with what is actually attached), which is what makes the send button light up. It is a normal draft: edit it, replace it, or just press Enter. The wording follows `language` from `/config`; to reword a language, edit its row in `LANGUAGES` in [src/host.js](src/host.js).
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
 
@@ -465,12 +465,18 @@ before it, so the chip is inserted before that sibling — in the same flex row,
 cannot overlap the history or new-chat buttons. React owns the row, so the existing MutationObserver
 re-inserts the chip after any commit that drops it.
 
-The values are the session object's live signals: `modelSelection`, falling back to `lastServedModel`
-and `currentMainLoopModel` for the model; `effortLevel` and `ultracodeEnabled` for the effort side.
-`settings.json` is deliberately not consulted — its `model` is a global default, and showing it is
-exactly the "not this chat" complaint. The `[1m]` context suffix is stripped before the family alias
-lookup, so `opus[1m]` renders as `Opus`, and an ultracode selection replaces the effort level in the
-label.
+The values are the session object's live signals: `currentMainLoopModel`, falling back to
+`modelSelection` and then `lastServedModel` for the model; `effortLevel` and `ultracodeEnabled` for the
+effort side. The main loop leads because the CLI can serve a model other than the selected one — a limit
+or capacity downgrade — and it is the only field that reports the substitution; a chip that led with the
+selection said `Opus` through a session whose main loop was `claude-fable-5`, which is the one case it
+exists for. The selection is the fallback for the window before the CLI has said anything, and
+`lastServedModel` comes last because a resume fills it by replaying the transcript, so it names the
+previous provider's model until the new one answers. `settings.json` is deliberately not consulted — its
+`model` is a global default, and showing it is exactly the "not this chat" complaint. The `[1m]` context
+suffix is stripped and the family is then read out of a full Anthropic id, so `opus[1m]` and
+`claude-opus-5[1m]` both render as `Opus`; a non-Anthropic provider's model name has no family to read
+and is shown verbatim (`deepseek-v4-pro`). An ultracode selection replaces the effort level in the label.
 
 ### Taking back the last message
 
