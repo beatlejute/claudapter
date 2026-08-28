@@ -30,7 +30,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Switching back to Anthropic keeps working.** The CLI feeds the previous answer's id back to Anthropic as `diagnostics.previous_message_id`, and an id minted by another provider (OpenRouter's `gen-1787815743-…`) is rejected with a `400` — every turn, forever, because the id is re-read from the transcript on each relaunch. A session that had answered elsewhere was simply unreachable from Anthropic. The spawn that goes to Anthropic now drops those ids from the transcript first; ids Anthropic itself issued are left alone, and so is every spawn going anywhere else.
 - **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
 - **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
-- **Pinned sessions** — hover a row in the session history and click the pin: it moves to the top of the list and stays there, above everything else, however old it gets. A search still applies — a pinned row that no longer matches is filtered out like any other, and the ones that do match keep their place at the front. The pins live in `~/.claude/claudapter/pinned.json` and are shared by every tab.
+- **Pinned sessions, and the running ones under them** — hover a row in the session history and click the pin: it moves to the top of the list and stays there, above everything else, however old it gets. Below the pins the list is ordered by how alive a session is, using the row's own status dot: first the ones running a turn or waiting for input (green), then the ones merely open in a tab (grey), then everything that is closed. A live session never sinks under a day-old one, and inside each block the app's own recency order is untouched. A search still applies — a pinned row that no longer matches is filtered out like any other, and the ones that do match keep their place at the front. The pins live in `~/.claude/claudapter/pinned.json` and are shared by every tab.
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
 - **Message timestamps** — every turn in the transcript gets a small local time, chat-app style, and a date separator ("Today", "Yesterday", or the date) wherever the day changes. Read straight off each message's own `.jsonl` timestamp, so it reflects when the turn actually happened, not when it rendered.
 - **A live frame under a subagent** — an `Agent`/`Task` call and a `run_agent` call both grow a small framed panel showing what the agent is doing while it does it: its prompt, the tools it reaches for, and what it is saying (in full where the page has the turns, as a running summary where it only has the progress feed). It opens itself while the run is going and folds away once the answer lands; click the header to keep it open. **Nothing it shows enters the parent conversation** — the tab's context stays the tool call and, at the end, the tool result. See [Watching a delegated run](#watching-a-delegated-run).
@@ -362,7 +362,7 @@ VS Code extension host                     webview (UI)
 | 4 | `webview/index.js` | *structural* — the three reads before `registerAction({id:"model"` | their command registry, jsx factory **and the session object** |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
 | 6 | `webview/index.js` | *structural* — the session list's `[query,setQuery]=ne(""),[renaming,…]=ne(null),refs=ge(new Map)` | two more state pairs — content-search results and pinned ids — and hands both setters over |
-| 7 | `webview/index.js` | *structural* — the title/branch filter expression that follows it | ORs in a content match, sorts pinned rows to the front, and exposes the unfiltered row list globally |
+| 7 | `webview/index.js` | *structural* — the title/branch filter expression that follows it | ORs in a content match, exposes the unfiltered row list globally, and — reaching past the component's `openState` accessor — orders the list: pinned, running, open, closed |
 | 8 | `webview/index.js` | `onChange:(e)=>J(e.target.value),placeholder:"Search sessions…"` | forwards every keystroke to the host-side transcript search |
 
 ### Sending an attachment on its own
@@ -544,6 +544,14 @@ cannot be a DOM move: the next commit would undo it. It is a **sort**, applied a
 injection point #7 already sits, on the list the app is about to render. That list is also the one it
 builds its keyboard-navigation index from, so arrow keys keep agreeing with what is on screen, and
 the order survives every re-render because it *is* part of the render.
+
+Live sessions ride the same sort. The order is four blocks — pinned, running or awaiting input, open
+but idle, closed — and each block keeps the app's own recency order inside it, so neither a pin nor a
+turn starting reorders anything else. The blocks are the row's own status dot, read through the
+component's `openState` accessor: the same function that decides whether the dot is drawn green, grey,
+or not drawn at all. That accessor is declared *after* the expression the sort hooks into, so
+injection point #7 spans both — filter, accessor, and the declaration that follows — and splices the
+sort in between them as a plain assignment.
 
 Search and pinning compose in the only way that makes sense: the sort runs on whatever survived the
 filter. With an empty query that is every session, so the pins sit at the very top; with a query it is

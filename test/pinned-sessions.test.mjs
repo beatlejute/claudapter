@@ -309,6 +309,75 @@ fireTimers((t) => t.ms === 0);
 fromHost({ type: 'ccx:state' });
 assert.equal(pinOf(pinnedRow).dataset.ccxPinned, '1', 'a missing field is not an empty list');
 
+// 22. A session that is running a turn sits above the idle ones — below the pins, not above them.
+//     Running is the row's own busy signal, the same one its green status dot is drawn from.
+const live = (id, state) => ({
+    sessionId: { value: id },
+    busy: { value: state === 'running' },
+    pendingInput: { value: state === 'waiting' },
+});
+const R1 = live('aaaaaaaa-1111-4222-8333-444444444444', 'running');
+const R2 = live('bbbbbbbb-1111-4222-8333-444444444444', 'waiting');
+const I1 = live('cccccccc-1111-4222-8333-444444444444', 'idle');
+const I2 = live('dddddddd-1111-4222-8333-444444444444', 'idle');
+fromHost({ type: 'ccx:state', pinnedSessions: [] });
+fireTimers((t) => t.ms === 0);
+assert.deepEqual(ccx.pinSort([I1, R1, I2], pinState), [R1, I1, I2], 'a running session must float over the idle ones');
+
+// 23. A session waiting for input counts as running: it is the row the user has to come back to.
+assert.deepEqual(ccx.pinSort([I1, I2, R2], pinState), [R2, I1, I2], 'a session awaiting input must float too');
+
+// 24. Recency inside each block is the app's own — floating one row never reorders its neighbours.
+assert.deepEqual(
+    ccx.pinSort([I1, R1, I2, R2], pinState),
+    [R1, R2, I1, I2],
+    'both blocks must keep the order they arrived in',
+);
+
+// 25. A pin outranks a running turn: an idle pinned row still comes first.
+fromHost({ type: 'ccx:state', pinnedSessions: [I2.sessionId.value] });
+fireTimers((t) => t.ms === 0);
+assert.deepEqual(ccx.pinSort([I1, R1, I2], pinState), [I2, R1, I1], 'a pin must outrank a running session');
+
+// 26. A list already in block order is handed back as it came — the same array, so a list that needs
+//     no move costs the render nothing.
+const ordered = [I2, R1, I1];
+assert.strictEqual(ccx.pinSort(ordered, pinState), ordered, 'an ordered list must not be copied');
+
+// 27. Handed the component's own openState accessor — the function its status dot is drawn from —
+//     the sort gains a third block: a session open in a tab but idle (the grey dot) still ranks above
+//     the ones that are not open at all.
+const dot = new Map([
+    [R1, 'running'],
+    [R2, 'waiting'],
+    [I1, 'idle'],
+]);
+const openState = (s) => dot.get(s);
+fromHost({ type: 'ccx:state', pinnedSessions: [] });
+fireTimers((t) => t.ms === 0);
+assert.deepEqual(
+    ccx.pinSort([I2, I1, R1], pinState, openState),
+    [R1, I1, I2],
+    'an open idle session must outrank a closed one',
+);
+
+// 28. Four blocks, each still in the order the app handed them over.
+assert.deepEqual(
+    ccx.pinSort([I2, R2, I1, R1], pinState, openState),
+    [R2, R1, I1, I2],
+    'every block must keep the app\'s own order',
+);
+
+// 29. The accessor is the app's, so a throw from it is not the sort's business: the row's own signals
+//     stand in and the list is still ordered rather than dropped.
+assert.deepEqual(
+    ccx.pinSort([I1, R1], pinState, () => {
+        throw Error('openState is not the page\'s to rely on');
+    }),
+    [R1, I1],
+    'a throwing accessor must fall back to busy/pendingInput',
+);
+
 console.log('OK — the page sorts, marks and toggles pins without waiting for the host');
 
 // --- Part 3: the wiring — the patcher must hand the component what the page relies on ---------
@@ -316,7 +385,14 @@ console.log('OK — the page sorts, marks and toggles pins without waiting for t
 const patcher = readFileSync(new URL('../scripts/apply-patch.mjs', import.meta.url), 'utf8');
 assert.ok(/onPinState\(ccxSetPinnedIds\)/.test(patcher), 'the pin state hook must be handed to onPinState');
 assert.ok(/\[ccxPinnedIds,ccxSetPinnedIds\]=\$\{useState\}\(null\)/.test(patcher), 'the pin state pair must be declared');
-assert.ok(/pinSort\(ccxL,ccxPinnedIds\)/.test(patcher), 'the rendered list must go through pinSort');
+assert.ok(
+    /pinSort\(\$\{result\},ccxPinnedIds,\$\{openState\}\)/.test(patcher),
+    'the rendered list must go through pinSort, carrying the openState accessor',
+);
+assert.ok(
+    /\$\{between\}\$\{openDecl\};/.test(patcher),
+    'the sort must be spliced in after the accessor, not inside the let chain',
+);
 const page = readFileSync(new URL('../src/webview.js', import.meta.url), 'utf8');
 assert.ok(/onPinState: onPinState/.test(page) && /pinSort: pinSort/.test(page), 'window.__ccx must expose both hooks');
 const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');

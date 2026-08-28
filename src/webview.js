@@ -645,28 +645,66 @@
         setTimeout(pushPinned, 0);
     }
 
-    // A stable partition, not a comparator: pinned rows move to the top as a block and keep the
-    // list's own recency order inside it, so pinning one session never reorders the others.
+    // A stable partition, not a comparator: rows fall into three blocks — pinned, running, and the
+    // rest — and keep the list's own recency order inside each one, so neither a pin nor a turn
+    // starting ever reorders anything else.
+    //
+    // Four blocks, and the middle two are the row's own status dot: the third argument is the
+    // component's accessor for it (openState — "waiting" / "running" / "idle", and nothing at all for
+    // a session that is not open in a tab), the same function that decides whether the dot is drawn
+    // green, grey, or not drawn. Sorting by the dot rather than by the raw signals is what puts an
+    // open-but-idle session above a closed one: idle and closed differ only by the openSessionIds
+    // prop, which the accessor closes over.
+    //
+    // Without the accessor — an older patcher, or a bundle whose openSessionIds memo has moved — the
+    // raw busy/pendingInput signals still separate the running rows from the rest, so the sort
+    // degrades to two blocks instead of failing.
     //
     // The second argument is what the component last received. Before the first push it is null and
     // the page's own copy stands in — it is authoritative either way, and the two only differ for
     // the one render between a toggle and the state write landing.
-    function pinSort(list, fromState) {
+    function pinSort(list, fromState, openState) {
         try {
             var pins = fromState && typeof fromState.has === 'function' ? fromState : pinnedIds;
-            if (!pins || !pins.size || !list || !list.length) return list;
-            var top = [];
-            var rest = [];
+            if (!list || !list.length) return list;
+            var blocks = [[], [], [], []];
+            var highest = 0;
+            var moved = false;
             for (var i = 0; i < list.length; i++) {
                 var session = list[i];
-                var id = session && session.sessionId && session.sessionId.value;
-                (id && pins.has(id) ? top : rest).push(session);
+                var rank = sessionRank(session, pins, openState);
+                if (rank < highest) moved = true;
+                else highest = rank;
+                blocks[rank].push(session);
             }
-            return top.length && rest.length ? top.concat(rest) : list;
+            // A list already in block order is handed back untouched: a fresh array would be a new
+            // identity for nothing, and this one is what the component memoises against.
+            return moved ? blocks[0].concat(blocks[1], blocks[2], blocks[3]) : list;
         } catch (e) {
             /* an unrecognised list is an unsorted list, not a broken history panel */
             return list;
         }
+    }
+
+    // 0 pinned, 1 running a turn or waiting for input, 2 open in a tab but idle, 3 not open at all.
+    function sessionRank(session, pins, openState) {
+        var id = session && session.sessionId && session.sessionId.value;
+        if (id && pins && pins.size && pins.has(id)) return 0;
+        var dot = null;
+        if (typeof openState === 'function') {
+            try {
+                dot = openState(session);
+            } catch (e) {
+                /* the accessor is the app's own; a throw from it is not this sort's business */
+            }
+        }
+        if (dot === 'running' || dot === 'waiting') return 1;
+        if (dot === 'idle') return 2;
+        // No dot at all, or a state this version has never heard of: fall back to the two signals the
+        // dot is drawn from, which are on the row whether or not the accessor reached us.
+        var busy = session && session.busy && session.busy.value === true;
+        var pending = session && session.pendingInput && session.pendingInput.value === true;
+        return busy || pending ? 1 : 3;
     }
 
     function togglePin(sessionId) {

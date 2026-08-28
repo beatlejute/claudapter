@@ -355,7 +355,33 @@ session unchanged since the last keystroke costs nothing to check again.
 The row a pin acts on is not the page's to keep. The session list is re-derived from the app's own
 array on every render, and the array is ordered by recency — move the node and the next commit puts
 it back. So pinning reuses point #7: the same expression that widens the filter also sorts its
-result, pinned ids first, before the component ever sees the list.
+result before the component ever sees the list.
+
+The sort is a stable partition into four blocks rather than a comparator: pinned ids, then the
+sessions running a turn or waiting for input, then the ones open in a tab but idle, then the rest —
+each block keeping the order it arrived in, so neither a pin nor a turn starting reorders anything
+around it. The block a row lands in is its own status dot, read through the component's `openState`
+accessor: `(session) => p30(openIds.has(id), session.busy.value, session.pendingInput.value)`, which
+answers `"waiting"` / `"running"` / `"idle"`, or nothing at all for a session that is not open. Idle
+and closed are indistinguishable without it — both have `busy === false` — which is the whole reason
+the signature reaches for it.
+
+Reaching for it is the awkward part. The accessor is declared some 400 bytes *after* the filter
+expression, in the same `let` chain, so the sort cannot run where the filter is: the name is in its
+temporal dead zone there, and a copy published on the previous render would put the order one render
+behind the thing it describes. So point #7 matches from the filter, across whatever the minifier left
+between the two (nothing that touches the list), through the accessor and the declaration that follows
+it, and rewrites the span: the filter keeps its place, the chain is closed with a `;`, the sort runs as
+a plain assignment — a second `u=` inside the same `let` would be a duplicate declaration — and a fresh
+`let` reopens the chain for the rest.
+
+```js
+…},[j5]);u=globalThis.__ccx&&globalThis.__ccx.pinSort?globalThis.__ccx.pinSort(u,ccxPinnedIds,y2):u;let [A5,q7]=…
+```
+
+A list already in block order is returned as the same array, so a render that needs no move allocates
+nothing, and an accessor that throws (or is missing, on an older patcher) drops the sort back to the
+raw `busy`/`pendingInput` signals rather than failing.
 
 That placement buys two things a DOM reorder cannot. The sorted array is what the component maps to
 rows *and* what it builds `Or = new Map(Kt.map((s, i) => [s, i]))` from — its keyboard-navigation

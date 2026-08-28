@@ -150,19 +150,31 @@ const PATCHES = [
         // list globally in the same expression — the onChange hook below needs it, and this is the one
         // place its variable name (`te`, but renamed on every release) is already in scope and captured.
         //
-        // The result then goes through pinSort, which floats the pinned sessions to the front. This is
-        // the list the app renders AND the one it builds its keyboard-navigation index from, so
-        // sorting it here — rather than moving rows in the DOM — keeps arrow keys agreeing with what
-        // is on screen, and survives every re-render because it is part of the render.
+        // The result then goes through pinSort, which orders the list by pin first and then by how
+        // alive the session is. This is the list the app renders AND the one it builds its
+        // keyboard-navigation index from, so sorting it here — rather than moving rows in the DOM —
+        // keeps arrow keys agreeing with what is on screen, and survives every re-render because it
+        // is part of the render.
+        //
+        // The sort cannot sit where the filter is, though. Telling an idle open session from a closed
+        // one needs the component's own openState accessor, and that is declared some 400 bytes
+        // further down the same `let` chain. So this signature spans both — the filter, whatever the
+        // minifier left between them (nothing that touches the list), the accessor itself, and the
+        // declaration that follows it — and the sort is spliced in between the two halves as a plain
+        // assignment. A second `${result}=` inside the same `let` would be a duplicate declaration,
+        // hence the `;` and the fresh `let` for the rest of the chain.
         file: 'webview/index.js',
-        find: /([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3/,
-        replace: (_found, result, query, source, item, lowerQ, titleFn) =>
+        find: /([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3([\s\S]{0,700}?)(,([\w$]+)=[\w$]+\(\([\w$]+\)=>\{if\(![\w$]+\)return;let [\w$]+=[\w$]+\([\w$]+\.sessionId\.value,[\w$]+\.isRemote\.value\);return [\w$]+\([\w$]+!==void 0&&[\w$]+\.has\([\w$]+\),[\w$]+\.busy\.value,[\w$]+\.pendingInput\.value\)\},\[[\w$]+\]\)),\[([\w$]+),([\w$]+)\]=([\w$]+)\(\(\)=>new Set\)/,
+        replace: (_found, result, query, source, item, lowerQ, titleFn, between, openDecl, openState, seen, setSeen, useState) =>
             `${result}=(globalThis.__ccxSearchCandidates=${source},` +
-            `((ccxL)=>globalThis.__ccx&&globalThis.__ccx.pinSort?globalThis.__ccx.pinSort(ccxL,ccxPinnedIds):ccxL)(` +
             `${query}?${source}.filter((${item})=>{` +
             `let ${lowerQ}=${query}.toLowerCase();return ${titleFn}(${item}).toLowerCase().includes(${lowerQ})||` +
             `(${item}.gitBranch.value?.toLowerCase().includes(${lowerQ})??!1)||` +
-            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)}):${source}))`,
+            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)}):${source})` +
+            `${between}${openDecl};` +
+            `${result}=globalThis.__ccx&&globalThis.__ccx.pinSort` +
+            `?globalThis.__ccx.pinSort(${result},ccxPinnedIds,${openState}):${result};` +
+            `let [${seen},${setSeen}]=${useState}(()=>new Set)`,
         where: 'replace',
     },
     {
