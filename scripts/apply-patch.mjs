@@ -1,5 +1,15 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, existsSync, readdirSync, copyFileSync, unlinkSync } from 'node:fs';
+import {
+    readFileSync,
+    writeFileSync,
+    existsSync,
+    readdirSync,
+    copyFileSync,
+    unlinkSync,
+    openSync,
+    closeSync,
+    statSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -180,6 +190,18 @@ const EXPECTATIONS = [];
 
 const MARKER = '__ccx';
 
+// The one line the automatic callers parse. `--if-needed` is what the keeper extension and the
+// in-session watcher run, and both have to tell "nothing to do" from "the patch was just re-applied,
+// this window is running the old bundle" — the second one is what earns a reload prompt.
+const RESULT = {
+    upToDate: 'ccx-result: up-to-date',
+    patched: 'ccx-result: patched',
+    // Followed by "<installed> <verified-against>" — a patch that went onto a version nobody checked
+    unverified: 'ccx-unverified:',
+    // Followed by "<published> <covers|behind>" — whether a release exists that knows this extension
+    upstream: 'ccx-upstream:',
+};
+
 function versionOf(dirName) {
     const m = dirName.match(/anthropic\.claude-code-(\d+)\.(\d+)\.(\d+)/);
     return m ? [+m[1], +m[2], +m[3]] : [0, 0, 0];
@@ -206,22 +228,101 @@ function findExtensionDir() {
     return path.join(root, newest);
 }
 
-// Project version mirrors the extension version the signatures were verified against
+// Project version mirrors the extension version the signatures were verified against.
+//
+// install.mjs also drops this script into ~/.claude/claudapter/, where the keeper extension and the
+// in-session watcher can reach it without the repository being anywhere on disk. There is no
+// package.json above it there, so the installer stamps the version into a file beside it instead.
+function projectMeta() {
+    for (const rel of ['../package.json', './patch-version.json']) {
+        try {
+            const json = JSON.parse(readFileSync(new URL(rel, import.meta.url), 'utf8'));
+            // package.json spells the repository as { type, url }; the stamp carries the bare string
+            if (json.version) return { version: json.version, repository: json.repository?.url || json.repository };
+        } catch {}
+    }
+    return {};
+}
+
+const PROJECT = projectMeta();
+
 function checkVersion(dir) {
-    const supported = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+    const supported = PROJECT.version || null;
     const installed = (path.basename(dir).match(/anthropic\.claude-code-(\d+\.\d+\.\d+)/) || [])[1];
-    console.log(`patcher:   ${supported}${installed && installed !== supported ? ` (installed ${installed})` : ''}`);
-    if (installed && installed !== supported)
+    const differs = Boolean(supported && installed && installed !== supported);
+    console.log(`patcher:   ${supported || 'unknown'}${differs ? ` (installed ${installed})` : ''}`);
+    if (differs)
         console.log('  WARNING: versions differ. If the signatures changed, the patch will stop with an error.');
+    return { supported, installed, differs };
+}
+
+// --- is there a release that knows this extension? ------------------------------------------------
+//
+// The patcher that runs unattended is a frozen copy: install.mjs puts it in ~/.claude/claudapter and
+// nothing ever refreshes it, which is deliberate — fetching code over the network at the moment it is
+// about to write into somebody else's bundle is a different trust surface entirely. So when a signature
+// moves, the automation cannot heal itself, and the only useful thing it can do is say whether the fix
+// already exists upstream. That is one GET of a published package.json, and nothing is ever downloaded
+// or executed from it: the answer is a version number that goes into a notification.
+//
+// It runs only when something changed — a patch that failed, or one that went onto an unverified
+// version. The quiet "already patched" path runs on every window and never touches the network.
+// --no-upstream-check or CCX_NO_UPSTREAM_CHECK=1 turns it off; CCX_UPSTREAM_URL points it at a fork.
+const UPSTREAM_TIMEOUT_MS = 4000;
+
+function githubSlug(url) {
+    const m = String(url || '').match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+    return m ? `${m[1]}/${m[2]}` : null;
+}
+
+function compareVersions(a, b) {
+    const [x, y] = [a, b].map((v) => v.split('.').map(Number));
+    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+}
+
+function upstreamUrl() {
+    if (process.env.CCX_UPSTREAM_URL) return process.env.CCX_UPSTREAM_URL;
+    const slug = githubSlug(PROJECT.repository);
+    // main always tracks the newest extension version the signatures were verified against
+    return slug ? `https://raw.githubusercontent.com/${slug}/main/package.json` : null;
+}
+
+async function upstreamLine(installed) {
+    if (!installed || process.argv.includes('--no-upstream-check') || process.env.CCX_NO_UPSTREAM_CHECK) return null;
+    const url = upstreamUrl();
+    if (!url || typeof fetch !== 'function') return null;
+    try {
+        const response = await fetch(url, {
+            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+            headers: { accept: 'application/json' },
+        });
+        if (!response.ok) return null;
+        const { version } = await response.json();
+        if (!/^\d+\.\d+\.\d+$/.test(version || '')) return null;
+        return `${RESULT.upstream} ${version} ${compareVersions(version, installed) >= 0 ? 'covers' : 'behind'}`;
+    } catch {
+        // Offline, proxied, rate-limited, renamed — none of it is worth a word to the user, who did not
+        // ask for a version check and is being shown a patch result
+        return null;
+    }
 }
 
 function backupPath(file) {
     return file + '.ccx-orig';
 }
 
+function patchedFiles() {
+    return [...new Set(PATCHES.map((p) => p.file))];
+}
+
+function filePatched(dir, rel) {
+    const file = path.join(dir, rel);
+    return existsSync(file) && readFileSync(file, 'utf8').includes(MARKER);
+}
+
 function restore(dir) {
     let n = 0;
-    for (const rel of new Set(PATCHES.map((p) => p.file))) {
+    for (const rel of patchedFiles()) {
         const file = path.join(dir, rel);
         if (!existsSync(backupPath(file))) continue;
         copyFileSync(backupPath(file), file);
@@ -280,15 +381,20 @@ function checkExpectations(dir) {
     }
 }
 
+// process.execPath is Code.exe when this runs from inside the extension host (the keeper extension and
+// the in-session watcher both spawn it that way), so the syntax check has to carry the flag that turns
+// it back into node — otherwise the child opens an editor window instead of parsing a file.
+const NODE_ENV_OPTS = { stdio: 'pipe', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } };
+
 function checkSyntax(file) {
     try {
-        execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+        execFileSync(process.execPath, ['--check', file], NODE_ENV_OPTS);
         return;
     } catch (cjsError) {
         const asModule = file + '.ccx-check.mjs';
         try {
             copyFileSync(file, asModule);
-            execFileSync(process.execPath, ['--check', asModule], { stdio: 'pipe' });
+            execFileSync(process.execPath, ['--check', asModule], NODE_ENV_OPTS);
         } catch {
             throw Error(`syntax check failed for ${file}:\n${cjsError.stderr}`);
         } finally {
@@ -300,19 +406,87 @@ function checkSyntax(file) {
 }
 
 function status(dir) {
-    for (const rel of new Set(PATCHES.map((p) => p.file))) {
-        const file = path.join(dir, rel);
-        const patched = existsSync(file) && readFileSync(file, 'utf8').includes(MARKER);
-        console.log(`${patched ? 'patched  ' : 'clean    '} ${rel}`);
+    for (const rel of patchedFiles()) console.log(`${filePatched(dir, rel) ? 'patched  ' : 'clean    '} ${rel}`);
+}
+
+// Restoring a 2.7 MB bundle from its backup and writing it back is not atomic, and the automatic
+// callers can genuinely collide: VS Code restores every window at once, each one activates the keeper,
+// and each keeper finds the same unpatched bundle. So the decision and the write happen together under
+// one lock — the loser then re-reads a bundle that is already patched and reports it, which is why the
+// "is it patched" test lives inside here rather than in front of it.
+//
+// Atomics.wait is the only way to sleep without going async, and going async would mean threading a
+// promise through a script whose every other operation is a *Sync call.
+const LOCK_STALE_MS = 120_000;
+const LOCK_WAIT_MS = 30_000;
+
+function sleep(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withLock(dir, run) {
+    const lock = path.join(dir, '.ccx.lock');
+    let held = null;
+
+    for (let waited = 0; held === null; waited += 250) {
+        try {
+            held = openSync(lock, 'wx');
+        } catch (e) {
+            if (e.code !== 'EEXIST') throw e;
+            // A crashed run leaves its lock behind, and nothing else would ever clear it
+            const age = Date.now() - (statSync(lock).mtimeMs || 0);
+            if (age > LOCK_STALE_MS || waited >= LOCK_WAIT_MS) {
+                try {
+                    unlinkSync(lock);
+                } catch {}
+                continue;
+            }
+            sleep(250);
+        }
+    }
+
+    try {
+        return run();
+    } finally {
+        try {
+            closeSync(held);
+            unlinkSync(lock);
+        } catch {}
     }
 }
 
 const dir = findExtensionDir();
 console.log(`extension: ${dir}`);
-checkVersion(dir);
+const versions = checkVersion(dir);
 if (process.argv.includes('--revert')) restore(dir);
 else if (process.argv.includes('--status')) status(dir);
 else {
-    apply(dir);
-    console.log('\nDone. Reload VS Code window (Ctrl+Shift+P → Developer: Reload Window).');
+    let failure = null;
+    let applied = false;
+    try {
+        withLock(dir, () => {
+            if (process.argv.includes('--if-needed') && patchedFiles().every((rel) => filePatched(dir, rel)))
+                return void console.log(RESULT.upToDate);
+            apply(dir);
+            applied = true;
+            console.log(RESULT.patched);
+            // Matching signatures are not a promise that the code around them still means the same
+            // thing. Someone running the patcher by hand has the version line and the warning above in
+            // front of them; an automatic run has nobody reading its output, so the mismatch has to
+            // travel out to the notification the user does see.
+            if (versions.differs) console.log(`${RESULT.unverified} ${versions.installed} ${versions.supported}`);
+        });
+    } catch (e) {
+        failure = e;
+    }
+
+    // Outside the lock — a network call is never worth holding a lock across, and the other windows
+    // waiting on it have nothing to do with this question
+    if (failure || (applied && versions.differs)) {
+        const line = await upstreamLine(versions.installed);
+        if (line) console.log(line);
+    }
+
+    if (failure) throw failure;
+    if (applied) console.log('\nDone. Reload VS Code window (Ctrl+Shift+P → Developer: Reload Window).');
 }

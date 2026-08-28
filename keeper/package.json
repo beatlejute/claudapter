@@ -1,0 +1,20 @@
+{
+    "name": "claudapter-keeper",
+    "displayName": "Claudapter Keeper",
+    "description": "Re-applies the Claudapter patch after Claude Code updates itself",
+    "version": "0.1.0",
+    "publisher": "local",
+    "license": "MIT",
+    "engines": { "vscode": "^1.85.0" },
+    "extensionKind": ["ui"],
+    "activationEvents": ["onStartupFinished"],
+    "main": "./extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "claudapter.applyPatch",
+                "title": "Claudapter: Apply patch to Claude Code"
+            }
+        ]
+    }
+}

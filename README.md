@@ -38,6 +38,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Local spellcheck with correction suggestions** — Russian words are checked locally with Hunspell. Misspellings receive a red wavy underline; right-click one to choose a correction. Only bounded, de-duplicated words leave the webview, and no draft text is sent over the network.
 - **Model and effort chip** — a small read-only chip in the composer's toolbar row, left of the mode picker: the model and reasoning effort this session is actually running (`Opus · xhigh`, or `· ultracode` when ultracode is selected). It reads the session's live signals, not `settings.json` — that file only holds the global defaults and would name the wrong chat. *Actually running* is literal: when the CLI serves something other than what was picked, the chip names what answered.
 - **Send an image with no text** — attaching a file to an empty composer writes a short prompt into it (`Analyse the image in the context of this conversation`, agreeing with what is actually attached), which is what makes the send button light up. It is a normal draft: edit it, replace it, or just press Enter. The wording follows `language` from `/config`; to reword a language, edit its row in `LANGUAGES` in [src/host.js](src/host.js).
+- **The patch survives Claude Code updates.** An update installs a new extension folder, which is where the patch lived — so it re-applies itself, from inside the running window while the update lands and from a small companion extension on the window that comes up after one. A signature that no longer matches stops the patcher before it writes, so the failure mode is a clean Claude Code and a notification, never a broken bundle. See [After a Claude Code update](#after-a-claude-code-update).
 - **Non-Anthropic providers** through a bundled protocol adapter: OpenAI, OpenRouter, Groq, Together, Ollama — and the ChatGPT Plus/Pro subscription.
 
 ## Requirements
@@ -68,12 +69,17 @@ node scripts/install.mjs
 
 It copies the runtime into `~/.claude/claudapter`, patches the installed extension and drops template profiles. Then run **Developer: Reload Window** in VS Code.
 
+It also installs the **keeper**, a small companion extension that re-applies the patch by itself after Claude Code updates — see [After a Claude Code update](#after-a-claude-code-update). Pass `--no-keeper` to skip it.
+
 | Command | Action |
 |---|---|
-| `npm run setup` | install runtime + apply patch |
+| `npm run setup` | install runtime + apply patch + install the keeper |
 | `npm run status` | show whether the files are patched |
 | `npm run revert` | restore the extension from backup |
 | `npm run apply` | patch only (runtime already installed) |
+| `npm run keeper` | build and install the keeper extension only |
+| `npm run keeper:status` | show whether the keeper is installed |
+| `npm run keeper:remove` | uninstall the keeper |
 | `npm test` | adapter tests, both protocol modes |
 
 The patch is always applied on top of the `*.ccx-orig` backup, so re-running it is idempotent.
@@ -572,9 +578,52 @@ Keys "owned" by profiles are computed as the union of every `env` across `~/.cla
 
 ## After a Claude Code update
 
-VS Code installs the new version into a separate folder, so the patch is gone. Re-run `node scripts/install.mjs` and reload the window. If the signatures changed in the new bundle, the patcher stops with an explicit error naming the mismatch instead of corrupting anything.
+VS Code installs the new version into a separate folder, so the patch is gone. **It is put back on its own** — two mechanisms cover the two ways an update can land, and both end in the same call, `apply-patch.mjs --if-needed`, so neither can decide differently from the other about what needs patching:
 
-`scripts/apply-patch.mjs` warns when the installed extension version differs from the one in `package.json`, but it is only a warning — a signature that still matches is still applied. The minified locals are the fragile part, so most points match the *shape* of the code around them rather than the names; only #5 is anchored to a string literal that survives minification unchanged. #1 was too, until 2.1.245 renamed all three locals in it.
+- **While VS Code is open.** The new folder is unpacked beside the running one, and this window keeps serving the old, patched bundle until it reloads — the only stretch of time in which anything of Claudapter is alive to notice. A watcher on `~/.vscode/extensions` patches the new folder right there, so the reload VS Code is already asking for comes up patched. No second reload, nothing to run.
+- **On the next window.** An update applied while VS Code was closed leaves nothing of Claudapter running: the window comes up on a clean bundle, which never loads `host.js`. The **keeper** — a three-file companion extension VS Code never replaces — activates on every window, asks the patcher whether the bundle beside it still has the hooks, and offers *Reload Window* when it has just put them back.
+
+Several windows reaching the same bundle at once — which is what VS Code restoring a session looks like — queue behind a lock rather than writing over each other; only the one that actually applied the patch offers a reload. To put it back by hand, or after checking out a different version branch, re-run `node scripts/install.mjs` and reload the window.
+
+The keeper carries none of the patch and no signatures; it only runs `~/.claude/claudapter/apply-patch.mjs`, which the installer copies there together with a version stamp so it works with the repository nowhere on disk. `npm run keeper:remove` uninstalls it, and `node scripts/install.mjs --no-keeper` skips installing one — the in-session watcher keeps working either way.
+
+### When the update is newer than this project
+
+The update will usually be. This project's version mirrors the extension version its signatures were *verified against*, so a release Claudapter has never seen is the normal case, not the exception — and the version number alone is never what decides. Refusing on it would turn every update into manual work for nothing: the minified locals are the fragile part, so most injection points match the **shape** of the code around them rather than the names in it, and a new bundle usually takes the patch unchanged. Three of the last four releases cost nothing at all.
+
+So the version check is a warning, and what actually decides is whether each signature still matches exactly once. Three outcomes:
+
+| | What happens | What you see |
+|---|---|---|
+| **Signatures match, version known** | patched, silently | *Claude Code was updated — the patch has been re-applied.* + **Reload Window** |
+| **Signatures match, version unverified** | patched — with the mismatch carried out to the notification, because an automatic run has no one reading its output | *the patch was re-applied on Claude Code 2.1.248, which is newer than the 2.1.247 it was verified against. It went on cleanly, but nothing has checked this version.* |
+| **A signature moved** | nothing is written; the patcher stops at the first mismatch, naming it | *the patch does not fit Claude Code 2.1.248 — its signatures moved, so it was not applied. Claude Code itself is untouched and working.* + **Show log** |
+
+The third row is the one that makes the whole thing safe to run unattended: the patch is applied on top of the `*.ccx-orig` backup and written in one go after every signature has been found, so a mismatch means the bundle is never opened for writing at all. Claude Code keeps working; Claudapter is simply off until the signatures are updated here. `~/.claude/claudapter/keeper.log` has what the patcher printed.
+
+The second row is the honest gap: a matching signature is not a promise that the code *around* it still means the same thing. A release can move what an assignment is assigning without moving the shape being matched — that is exactly how the `previous_message_id` and `rename_tab` traps in [docs/internals.md](docs/internals.md) were found. Nothing can detect that automatically, which is why the notification names both versions rather than staying quiet: check the tab once, and `npm run revert` if something is off. Only #5 is anchored to a string literal that survives minification unchanged; #1 was too, until 2.1.245 renamed all three locals in it.
+
+### Is the fix already published?
+
+The patcher that runs unattended is a **frozen copy**. `install.mjs` puts it in `~/.claude/claudapter/` and nothing ever refreshes it — that is deliberate: pulling code over the network at the moment it is about to write into somebody else's bundle would be an entirely different thing to trust. So rows two and three above cannot heal themselves. Updating the signatures is `git pull && node scripts/install.mjs`, by hand, always.
+
+What the frozen copy *can* do is tell you whether that pull is worth making. On those two rows only, it reads one published `package.json`:
+
+```
+GET https://raw.githubusercontent.com/<owner>/<repo>/main/package.json
+```
+
+— the owner and repo taken from this project's own `repository` field, carried into `~/.claude/claudapter/patch-version.json` at install time. **Nothing is downloaded or executed from it.** The response is parsed for one field, `version`, and the answer is one of two words in a notification: a release at or above the installed extension version *covers* it, an older one is *behind*.
+
+| | Notification |
+|---|---|
+| A signature moved, and a release covering this version exists | *the patch does not fit Claude Code 2.1.248, but Claudapter 2.1.248 is published. Pull it and re-run "node scripts/install.mjs".* + **Open repository** |
+| A signature moved, nothing published covers it yet | the plain message from the table above + **Open repository** / **Show log** |
+| Patched onto an unverified version, and a release covering it exists | *…it went on cleanly, and Claudapter 2.1.248 is published — pull it for signatures that were checked against this release.* |
+
+The quiet path — the one that runs on **every window** and finds the bundle already patched — never touches the network. Neither does anything else: the check fires only when a patch failed or went onto a version this copy does not know, which is at most once per Claude Code update. Any failure (offline, proxy, rate limit) is silent and the plain message is shown instead.
+
+To turn it off entirely: `--no-upstream-check` on the patcher, or `CCX_NO_UPSTREAM_CHECK=1` in the environment. `CCX_UPSTREAM_URL` points it at a fork or mirror instead.
 
 ### Version branches
 

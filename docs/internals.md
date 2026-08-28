@@ -651,6 +651,26 @@ document: it does not inherit `currentColor` or any VS Code theme variable, and 
 literal `#` truncates the URL. Brand marks are unaffected — they carry their own colours — but a
 theme-coloured glyph would have to be an inline `<svg>` element instead.
 
+### A dropped extension folder is never loaded
+
+Not a bundle finding but a VS Code one, and it decides how the keeper (the companion extension that
+re-applies the patch after a Claude Code update) is installed. `~/.vscode/extensions` looks like a
+directory VS Code scans, and putting a folder with a valid `package.json` in it looks like it works. It
+does not: since 1.74 the scan is cached in `~/.vscode/extensions/extensions.json`, and a folder that was
+never installed through the CLI stays out of that cache and is simply never activated. On this machine
+`local.claude-profiler-0.0.1` had been sitting there for months — its `extension.js` present, its
+`package.json` valid, absent from `extensions.json` and from `code --list-extensions`, dead the whole
+time. There is no error and no entry in the Extensions view; the extension is just not there.
+
+`code --install-extension <file>.vsix` is the only way in that also registers the extension, and it
+takes a `.vsix` — never a folder. That is a ZIP with `extension/` beside an `extension.vsixmanifest`
+and a `[Content_Types].xml`, which is 60 lines of `deflateRawSync` and the CRC-32 already used for PNG
+output (`scripts/vsix.mjs`); `vsce` would pull a dependency tree into a project that has none. Two
+Windows details cost a run each: `where code` answers with the extensionless bash script *before* the
+`.cmd`, and Windows cannot execute the first one at all; and a `.cmd` cannot be spawned directly since
+the Node 18.20/20.12 security fix, so it goes through a shell — handed the whole command line rather
+than an args array, which is also what keeps `DEP0190` out of the installer's output.
+
 ## Non-Anthropic providers
 
 The CLI has no OpenAI support: across the whole 24 MB bundle there is neither `chat/completions` nor `OPENAI_API_KEY`; the nine occurrences of `openai` are secret-scanner regexes and skill texts. Only the Anthropic API, Bedrock (`CLAUDE_CODE_USE_BEDROCK`) and Vertex (`CLAUDE_CODE_USE_VERTEX`) are supported — all on top of the Messages API.

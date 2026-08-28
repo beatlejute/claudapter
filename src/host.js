@@ -25,26 +25,44 @@ function versionOf(dirName) {
     return m ? [+m[1], +m[2], +m[3]] : [0, 0, 0];
 }
 
-// The extension flips the tab icon between these three on every rename_tab
-const STOCK_LOGO = { idle: 'claude-logo.svg', done: 'claude-logo-done.svg', pending: 'claude-logo-pending.svg' };
+const EXTENSIONS_ROOT = path.join(HOME, '.vscode', 'extensions');
 
-function defaultIcon(state = 'idle') {
-    const root = path.join(HOME, '.vscode', 'extensions');
+// Retired folders linger on disk until VS Code garbage-collects them, and .obsolete is what marks them.
+// Skipping them matters for the update watcher, which reads "the newest folder is not the one this
+// window is running" as an update having landed — an obsolete folder answering that question would send
+// the patcher at a version nobody is about to load.
+function newestExtensionDir({ includeObsolete = false } = {}) {
     try {
+        let obsolete = {};
+        if (!includeObsolete) {
+            try {
+                obsolete = JSON.parse(fs.readFileSync(path.join(EXTENSIONS_ROOT, '.obsolete'), 'utf8')) || {};
+            } catch {}
+        }
         const dir = fs
-            .readdirSync(root)
-            .filter((d) => d.startsWith('anthropic.claude-code-'))
+            .readdirSync(EXTENSIONS_ROOT)
+            .filter((d) => d.startsWith('anthropic.claude-code-') && !obsolete[d])
             .sort((a, b) => {
                 const [x, y] = [versionOf(a), versionOf(b)];
                 return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
             })
             .pop();
-        if (!dir) return null;
-        const icon = path.join(root, dir, 'resources', STOCK_LOGO[state] || STOCK_LOGO.idle);
-        return fs.existsSync(icon) ? icon : null;
+        return dir ? path.join(EXTENSIONS_ROOT, dir) : null;
     } catch {
         return null;
     }
+}
+
+// The extension flips the tab icon between these three on every rename_tab
+const STOCK_LOGO = { idle: 'claude-logo.svg', done: 'claude-logo-done.svg', pending: 'claude-logo-pending.svg' };
+
+function defaultIcon(state = 'idle') {
+    // An icon is only a file to read, so an obsolete folder still serves it — better a stale logo than
+    // none on the window that is running one
+    const dir = newestExtensionDir() || newestExtensionDir({ includeObsolete: true });
+    if (!dir) return null;
+    const icon = path.join(dir, 'resources', STOCK_LOGO[state] || STOCK_LOGO.idle);
+    return fs.existsSync(icon) ? icon : null;
 }
 
 const S = (globalThis.__ccxState ||= {
@@ -53,6 +71,9 @@ const S = (globalThis.__ccxState ||= {
     settingsWatcher: null,
     bindingsWatcher: null,
     profilesWatcher: null,
+    extensionsWatcher: null,
+    repatching: false,
+    repatchTries: new Map(),
     activeSessionByPanel: new Map(),
     profileByWebview: new Map(),
     pendingProfile: null,
@@ -1278,16 +1299,146 @@ function watchFile(file, onChange) {
     }
 }
 
-function watchDir(dir, onChange) {
+function watchDir(dir, onChange, delay = 200) {
     if (!fs.existsSync(dir)) return null;
     let timer = null;
     try {
         return fs.watch(dir, () => {
             clearTimeout(timer);
-            timer = setTimeout(onChange, 200);
+            timer = setTimeout(onChange, delay);
         });
     } catch {
         return null;
+    }
+}
+
+const PATCHER = path.join(DIR, 'apply-patch.mjs');
+// A folder still being unpacked reads exactly like one whose signatures moved, so a failure is retried
+// a couple of times before it is reported
+const REPATCH_TRIES = 3;
+
+function offerReload(message) {
+    try {
+        vscode.window.showInformationMessage(message, 'Reload Window').then((choice) => {
+            if (choice === 'Reload Window') vscode.commands.executeCommand('workbench.action.reloadWindow');
+        });
+    } catch {}
+}
+
+// Matching signatures are not a promise that the code around them still means the same thing — most of
+// them match the *shape* of an assignment, and a release can move what is being assigned without moving
+// the shape. A hand-run patch prints the version mismatch for someone who is reading; an automatic one
+// has no reader, so the notification is the only place the mismatch can surface.
+function reloadMessage(out) {
+    const [, installed, verified] = out.match(/^ccx-unverified: (\S+) (\S+)$/m) || [];
+    if (!installed) return 'Claudapter: Claude Code was updated — the patch has been re-applied.';
+    const published = upstreamCovers(out);
+    if (published)
+        return (
+            `Claudapter: the patch was re-applied on Claude Code ${installed}, verified only against ` +
+            `${verified}. It went on cleanly, and Claudapter ${published} is published — pull it for ` +
+            'signatures that were checked against this release.'
+        );
+    return (
+        `Claudapter: the patch was re-applied on Claude Code ${installed}, which is newer than the ` +
+        `${verified} it was verified against. It went on cleanly, but nothing has checked this version.`
+    );
+}
+
+function versionOfDir(dir) {
+    return (path.basename(dir).match(/(\d+\.\d+\.\d+)/) || [])[1] || null;
+}
+
+// The patcher answers "is there a release that knows this extension" on its last line; `covers` is the
+// only answer worth acting on, and it turns "the patch broke" into "pull and re-run the installer"
+function upstreamCovers(out) {
+    const [, published, standing] = out.match(/^ccx-upstream: (\S+) (\S+)$/m) || [];
+    return standing === 'covers' ? published : null;
+}
+
+function repositoryUrl() {
+    const url = readJson(path.join(DIR, 'patch-version.json'))?.repository;
+    return typeof url === 'string' ? url.replace(/^git\+/, '').replace(/\.git$/, '') : null;
+}
+
+function showUpdateProblem(message) {
+    const repository = repositoryUrl();
+    const actions = [...(repository ? ['Open repository'] : []), 'Show log'];
+    try {
+        vscode.window.showWarningMessage(message, ...actions).then((choice) => {
+            if (choice === 'Open repository') vscode.env.openExternal(vscode.Uri.parse(repository));
+            if (choice === 'Show log') vscode.window.showTextDocument(vscode.Uri.file(LOG_FILE));
+        });
+    } catch {}
+}
+
+// A Claude Code update installs a new folder beside the running one, and the patch lives inside the
+// folder it replaces — so every update throws it away. This window keeps running the old, patched
+// bundle until it reloads, and that is the only stretch of time in which anything of Claudapter is
+// alive to notice: the window that comes up afterwards loads a clean bundle, which never requires this
+// file. Patching the new folder now means the reload VS Code is about to ask for comes up patched, with
+// no second reload and nothing to run by hand. The case this cannot reach — an update applied while VS
+// Code was closed — is what the keeper extension is for.
+//
+// process.execPath is Code.exe in the extension host; ELECTRON_RUN_AS_NODE turns it back into node, the
+// same way the proxy is spawned.
+function repatchAfterUpdate() {
+    const tries = (S.repatchTries ||= new Map());
+    if (S.repatching || !fs.existsSync(PATCHER)) return;
+
+    let running = null;
+    try {
+        running = vscode.extensions.getExtension('anthropic.claude-code')?.extensionPath || null;
+    } catch {}
+    const newest = newestExtensionDir();
+    if (!running || !newest || path.resolve(newest) === path.resolve(running)) return;
+
+    // Every write anywhere under ~/.vscode/extensions wakes the watcher, so a folder already settled —
+    // patched, or refused because its signatures moved — must not be spawned against again
+    const attempt = tries.get(newest) || 0;
+    if (attempt >= REPATCH_TRIES) return;
+    tries.set(newest, attempt + 1);
+    S.repatching = true;
+
+    let out = '';
+    const settle = (code) => {
+        S.repatching = false;
+        dlog('repatch', { dir: path.basename(newest), code, out: out.trim() });
+        if (code === 0) {
+            tries.set(newest, REPATCH_TRIES);
+            if (out.includes('ccx-result: patched')) offerReload(reloadMessage(out));
+            return;
+        }
+        if (attempt + 1 < REPATCH_TRIES) return void setTimeout(repatchAfterUpdate, 15000);
+        // The patcher never writes when a signature no longer matches, so the new bundle is intact and
+        // clean: Claude Code works, Claudapter is off until the signatures are updated. The frozen copy
+        // cannot update itself, so the one thing worth saying is whether the fix is already published.
+        const version = versionOfDir(newest) || 'as installed';
+        const published = upstreamCovers(out);
+        showUpdateProblem(
+            published
+                ? `Claudapter: the patch does not fit Claude Code ${version}, but Claudapter ${published} is ` +
+                      'published. Pull it and re-run "node scripts/install.mjs".'
+                : `Claudapter: the patch does not fit Claude Code ${version} — its signatures moved, so it ` +
+                      'was not applied. Claude Code itself is untouched and working.',
+        );
+    };
+
+    try {
+        const child = spawn(process.execPath, [PATCHER, '--if-needed', `--dir=${newest}`], {
+            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+            windowsHide: true,
+        });
+        child.stdout.on('data', (b) => (out += b));
+        child.stderr.on('data', (b) => (out += b));
+        child.on('error', (e) => {
+            out += `\n${e.message}`;
+            settle(1);
+        });
+        child.on('close', settle);
+    } catch (e) {
+        out += `\n${e.message}`;
+        settle(1);
     }
 }
 
@@ -1303,6 +1454,13 @@ function ensureWatchers() {
     if (!S.settingsWatcher) S.settingsWatcher = watchFile(SETTINGS_FILE, broadcast);
     if (!S.bindingsWatcher) S.bindingsWatcher = watchFile(BINDINGS_FILE, broadcast);
     if (!S.profilesWatcher) S.profilesWatcher = watchDir(PROFILES_DIR, broadcast);
+    if (!S.extensionsWatcher) {
+        // An extension install writes a whole tree and then renames it into place, so the burst is long
+        // — 200 ms would spawn the patcher at a half-written folder
+        S.extensionsWatcher = watchDir(EXTENSIONS_ROOT, repatchAfterUpdate, 3000);
+        // The update may already have landed before this tab was opened, and that write is gone
+        repatchAfterUpdate();
+    }
 }
 
 function panelFor(webview) {
