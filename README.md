@@ -34,6 +34,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Real model names** in the model picker: `Opus (1M context) → deepseek-v4-pro`, `Sonnet → deepseek-reasoner`.
 - **Message timestamps** — every turn in the transcript gets a small local time, chat-app style, and a date separator ("Today", "Yesterday", or the date) wherever the day changes. Read straight off each message's own `.jsonl` timestamp, so it reflects when the turn actually happened, not when it rendered.
 - **A live frame under a subagent** — an `Agent`/`Task` call and a `run_agent` call both grow a small framed panel showing what the agent is doing while it does it: its prompt, the tools it reaches for, and what it is saying (in full where the page has the turns, as a running summary where it only has the progress feed). It opens itself while the run is going and folds away once the answer lands; click the header to keep it open. **Nothing it shows enters the parent conversation** — the tab's context stays the tool call and, at the end, the tool result. See [Watching a delegated run](#watching-a-delegated-run).
+- **"Provider status…"** — its own entry in the *Model* section, beside *Account & Usage*, carrying the count of what is down. It opens a list with one row per profile — brand mark, model, and the verdict of the last call actually made to it: answered, refused (with the provider's own words and when the quota comes back), never replied, or never asked. Nothing is probed to draw it; the rows report what the delegation preflight already found out. The sessions sidebar carries the same list as a foldable **Providers** section between *Account & usage* and *Session manager*. See [Provider status](#provider-status).
 - **Quote selection** — right-click selected text in the transcript and the quote lands in the composer, blockquoted, ready to type after. A selection inside a code block becomes a fenced block instead.
 - **Local spellcheck with correction suggestions** — Russian words are checked locally with Hunspell. Misspellings receive a red wavy underline; right-click one to choose a correction. Only bounded, de-duplicated words leave the webview, and no draft text is sent over the network.
 - **Send an image with no text** — attaching a file to an empty composer writes a short prompt into it (`Analyse the image in the context of this conversation`, agreeing with what is actually attached), which is what makes the send button light up. It is a normal draft: edit it, replace it, or just press Enter. The wording follows `language` from `/config`; to reword a language, edit its row in `LANGUAGES` in [src/host.js](src/host.js).
@@ -333,6 +334,41 @@ A zero column is printed rather than dropped: a column that disappears is a colu
 ```
 
 `"*"` covers every model the block does not name; `cache_write` falls back to `input`. Only claudapter reads this key — the CLI never sees it. Without it the line says so, rather than printing a number that is not the truth.
+
+### Provider status
+
+*Account & Usage* answers one question: how much of **this** subscription is left. On an install that switches provider per tab that is a fraction of the picture — the other endpoints carry quotas of their own, and the first sign one of them is spent is usually a delegated run that dies a minute after it was handed the work.
+
+So the *Model* section of the command menu gets a second entry of its own, **Provider status…**, right beside *Account & Usage* and carrying the same count its list opens with:
+
+```
+PROVIDER STATUS                                  1 ok · 2 down
+What the last call to each profile found — checked before a
+delegated run, never from here
+
+[🅐] claude                                              never
+[🅒] codex                                                  2m
+[🅖] glm                                                    1h
+[🅜] minimax                                                2d
+
+     hovering [🅖] ─ HTTP 429 · Insufficient balance or no
+                     resource package · resets in 2h
+```
+
+Each row opens with the profile's own brand mark — the same icon the session history uses — and the dot on its corner is the state. One line per provider: name and how long ago it was checked. Hovering the mark gives the reason — the provider's own refusal, quoted, with `resets in …` where it said so — and hovering the rest of the row gives the endpoint and the model, since a model repeats across every profile on one adapter and says nothing about whether that provider answers. The four are kept apart because they send you to different places:
+
+| Dot | Means | Where the answer is |
+|---|---|---|
+| green | the last call was answered | — |
+| red | the provider refused: `HTTP <status>`, its own message, and `resets in …` when it said so | the account, or the wait |
+| yellow | the endpoint never replied | the adapter, not the quota |
+| grey | nothing has ever asked it | — |
+
+**Nothing is probed to draw this.** The verdicts are already on disk: the MCP server tests a profile before it delegates to it and writes the result to `~/.claude/claudapter/agent-health.json`, which the host forwards with every state push and re-reads whenever the file changes — a list that opened a connection per provider each time it rendered would spend real quota to draw a row. What follows from that is the one limitation worth knowing: **a row is as fresh as the last delegated run through that profile**, which is why the age sits beside every one of them and a verdict older than 12 hours is drawn dimmed rather than green. A profile you have never delegated to shows `never`, not a guess.
+
+The bound profile is highlighted, so the list also says which of these the tab in front of you is running, and it repaints itself while it is open — a provider that comes back turns green without a reopen. Clicking a row opens that profile's `~/.claude/profiles/<name>.json` in the editor — every answer the list raises is settled in that file: a credential left as a placeholder, a model to remap, an endpoint that moved. Switching provider is not on the rows: it stays with *Switch provider…*, the only place that also restarts the channel.
+
+**The sessions sidebar carries it too.** That sidebar already stacks foldable sections — *Account & usage*, then *Session manager* — and a **Providers** section is added between them, built out of the sidebar's own header markup (down to its chevron) so it folds and reads like the two it sits with. The header's right-hand slot holds the count, where the account section holds *View details*, and clicking it opens the full list with the error notes a narrow sidebar has no room for. The fold is remembered per window, so a section you collapsed stays collapsed across state pushes and reloads.
 
 ## How it works
 

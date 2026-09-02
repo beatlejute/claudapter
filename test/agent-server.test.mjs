@@ -252,6 +252,18 @@ async function main() {
     const keyEnv = { ...providerEnv, ANTHROPIC_API_KEY: 'sk-key', ANTHROPIC_AUTH_TOKEN: undefined };
     delete keyEnv.ANTHROPIC_AUTH_TOKEN;
     assert.strictEqual(await preflight(keyEnv, 'haiku'), null, 'a profile authenticating by API key is probed too');
+    // A credential left as a placeholder is caught before the request: a header value must be Latin-1,
+    // so fetch() would throw "Cannot convert argument to a ByteString…" from inside Headers and the
+    // provider would be recorded as unreachable — pointing at the endpoint instead of at the profile.
+    probed = null;
+    const placeholder = { ...providerEnv, ANTHROPIC_AUTH_TOKEN: 'sk-ЗАМЕНИТЕ' };
+    const refusal = await preflight(placeholder, 'haiku', 'placeholder');
+    assert.match(refusal, /ANTHROPIC_AUTH_TOKEN is not a usable key/, 'the profile is named, not the network');
+    assert.match(refusal, /character 4 is outside Latin-1/, 'and the position of the first bad character with it');
+    assert.ok(!refusal.includes('ЗАМЕНИТЕ'), 'a credential is never quoted back');
+    assert.strictEqual(probed, null, 'no request goes out for a key that cannot become a header');
+    assert.match(describeHealth('placeholder'), /FAILED/, 'and the verdict is recorded as a refusal, not as silence');
+
     probed = null;
     const { ANTHROPIC_AUTH_TOKEN, ...noAuth } = providerEnv;
     assert.strictEqual(await preflight(noAuth, 'haiku'), null, 'a profile with no credential at all is not probed');

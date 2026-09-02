@@ -29,6 +29,8 @@
     var jsx = null;
     var chip = null;
     var overlay = null;
+    // Which of the two overlays is up: only the status list is worth repainting on a state push.
+    var overlayKind = null;
     var launchByChannel = {};
     var sessionByChannel = {};
     var activeChannelId = null;
@@ -111,9 +113,100 @@
                 'Model',
                 openPicker
             );
+            // An entry of its own rather than a section grafted into Account & Usage: that panel is
+            // React-owned, its class names carry a per-build hash, and it reports one subscription —
+            // while this reports every profile. The tally rides on the menu row, so the state of the
+            // other providers is legible without opening anything.
+            registry.registerAction(
+                {
+                    id: 'ccx-health',
+                    label: 'Provider status…',
+                    description: 'Last verdict from each API provider profile',
+                    trailingComponent: healthTally(),
+                },
+                'Model',
+                openHealth
+            );
         } catch (e) {
             console.warn('ccx: registerAction failed', e);
         }
+    }
+
+    function tallyText(rows) {
+        var down = 0;
+        var known = 0;
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i].state === 'unknown') continue;
+            known++;
+            if (rows[i].state !== 'ok') down++;
+        }
+        if (!known) return 'not probed yet';
+        return down ? known - down + ' ok · ' + down + ' down' : known + ' ok';
+    }
+
+    function healthTally() {
+        if (!jsx) return undefined;
+        var rows = providerRows(state.now || Date.now());
+        var down = 0;
+        var known = 0;
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i].state === 'unknown') continue;
+            known++;
+            if (rows[i].state !== 'ok') down++;
+        }
+        if (!known) return undefined;
+        return jsx('span', {
+            // One chip style, whatever the count says. A red pill next to the profile chip read as a
+            // different kind of control; which providers are down is the rows' job to show.
+            className: 'ccx-prov-tag',
+            children: down ? down + ' down' : 'all ok',
+        });
+    }
+
+    function openHealth() {
+        closePicker();
+        var rows = providerRows(state.now || Date.now());
+        overlay = document.createElement('div');
+        overlay.className = 'ccx-overlay';
+        overlay.onclick = function (e) {
+            if (e.target === overlay) closePicker();
+        };
+        overlayKind = 'health';
+
+        var box = document.createElement('div');
+        box.className = 'ccx-box ccx-health-box';
+
+        var title = document.createElement('div');
+        title.className = 'ccx-title';
+        title.textContent = 'Provider status';
+        var tally = document.createElement('span');
+        tally.className = 'ccx-prov-tally';
+        tally.textContent = tallyText(rows);
+        title.appendChild(tally);
+        box.appendChild(title);
+
+        var hint = document.createElement('div');
+        hint.className = 'ccx-hint';
+        // Said out loud because it is the one thing a status list is normally assumed to do: this one
+        // reports what the last real call found, and never spends a request of its own to refresh it.
+        hint.textContent = 'What the last call to each profile found — checked before a delegated run, never from here';
+        box.appendChild(hint);
+
+        var list = document.createElement('div');
+        list.className = 'ccx-prov-list';
+        paintProviders(list, rows, state.active);
+        box.appendChild(list);
+
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+
+        var onKey = function (e) {
+            if (e.key === 'Escape') {
+                closePicker();
+                window.removeEventListener('keydown', onKey, true);
+            }
+        };
+        window.addEventListener('keydown', onKey, true);
     }
 
     function syncChip() {
@@ -135,6 +228,7 @@
     function closePicker() {
         if (overlay) overlay.remove();
         overlay = null;
+        overlayKind = null;
     }
 
     function openPicker() {
@@ -222,6 +316,9 @@
                 active: d.active || null,
                 models: d.models || null,
                 bindings: d.bindings || {},
+                // The host stamps every state push, so the ages in the panel are all measured from
+                // one instant instead of from whenever each row happened to be drawn.
+                now: d.now || Date.now(),
                 sessionId: d.sessionId || state.sessionId,
             };
             adoptAttachmentPrompts(d.attachmentPrompts);
@@ -240,15 +337,21 @@
                 for (var hi = 0; hi < d.hiddenMessages.length; hi++) hiddenUuids.add(d.hiddenMessages[hi]);
             syncAction();
             syncChip();
+            if (overlayKind === 'health') openHealth();
             decorateModelPicker();
             decorateSessionList();
             decorateTranscript();
             decorateAgentFrames();
+            decorateSidebar();
             applyHidden();
         } else if (d.type === 'ccx:icons') {
             icons = d.icons || {};
             fallback = d.fallback || null;
             decorateSessionList();
+            decorateSidebar();
+            // An icon arriving after the fact is the one thing the open status list cannot redraw on
+            // its own — it was painted before the host got round to sending the brand marks.
+            if (overlayKind === 'health') openHealth();
         } else if (d.type === 'ccx:applied') {
             if (d.sessionId && !state.sessionId) state.sessionId = d.sessionId;
             restartChannel(d.name);
@@ -1201,6 +1304,274 @@
         }
     }
 
+    // --- Provider health in the account panel --------------------------------------------------
+    //
+    // The stock Account & Usage panel answers one question: how much of *this* subscription is left.
+    // On an install that switches provider per tab that is a fraction of the picture — the other
+    // endpoints carry their own quotas, and the first sign one of them is spent is usually a
+    // delegated run that dies a minute after it was handed the work.
+    //
+    // The verdicts already exist: the MCP server probes a profile before it delegates to it and
+    // writes the result to agent-health.json, which the host forwards on every ccx:state. Nothing is
+    // probed from here — a panel that opened a connection per provider each time it rendered would
+    // spend real quota to draw a row.
+    //
+    // Read-only on purpose. The rows report; switching provider stays with the picker, which is the
+    // one place that also restarts the channel.
+    var STALE_MS = 12 * 60 * 60 * 1000;
+
+    function providerAge(ms) {
+        if (!isFinite(ms) || ms < 0) return '';
+        var s = Math.round(ms / 1000);
+        if (s < 90) return s + 's';
+        var m = Math.round(s / 60);
+        if (m < 90) return m + 'm';
+        var h = Math.round(m / 60);
+        if (h < 36) return h + 'h';
+        return Math.round(h / 24) + 'd';
+    }
+
+    // Four states, and the difference between the middle two is the whole reason they are kept apart:
+    // a provider that refused is an account to top up, one that never answered is an adapter to
+    // restart, and one nothing has ever asked is neither.
+    function providerState(health) {
+        if (!health) return 'unknown';
+        if (health.ok) return 'ok';
+        return health.unreachable ? 'silent' : 'failed';
+    }
+
+    function providerNote(health, now) {
+        if (!health || health.ok) return '';
+        var parts = [];
+        if (health.unreachable) parts.push('no answer');
+        else if (health.status) parts.push('HTTP ' + health.status);
+        if (health.message) parts.push(health.message);
+        if (health.resetsAt) {
+            var left = health.resetsAt - now;
+            parts.push(left > 0 ? 'resets in ' + providerAge(left) : 'reset window passed — worth retrying');
+        }
+        return parts.join(' · ');
+    }
+
+    function providerRows(now) {
+        var list = state.profiles || [];
+        var rows = [];
+        for (var i = 0; i < list.length; i++) {
+            var p = list[i];
+            var h = p.health || null;
+            rows.push({
+                name: p.name,
+                // What the probe actually reached beats what the profile asks for: a profile whose
+                // model was remapped upstream is exactly the row worth being honest about.
+                model: (h && h.model) || p.model || '',
+                endpoint: p.endpoint || '',
+                state: providerState(h),
+                stale: Boolean(h && now - h.at > STALE_MS),
+                age: h ? providerAge(now - h.at) : '',
+                note: providerNote(h, now),
+                icon: icons[p.name] || null,
+            });
+        }
+        return rows;
+    }
+
+    function paintProviders(host, rows, active) {
+        host.textContent = '';
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            var row = document.createElement('div');
+            row.className = 'ccx-prov-row';
+            row.setAttribute('data-ccx-prov', r.state);
+            if (r.stale) row.setAttribute('data-ccx-prov-stale', '1');
+            if (r.name === active) row.setAttribute('data-ccx-prov-active', '1');
+            row.title = [r.name, r.endpoint, r.model, r.age ? 'checked ' + r.age + ' ago' : 'never probed']
+                .filter(Boolean)
+                .join(' · ') + '\nClick to open ~/.claude/profiles/' + r.name + '.json';
+            // Every answer this list gives ends in the same place — the profile file: a placeholder
+            // left in a credential, a model that needs remapping, an endpoint that moved. The host
+            // opens it; the page only names which one, and the overlay gets out of the way.
+            row.onclick = (function (name) {
+                return function () {
+                    send({ type: 'ccx:openProfile', name: name });
+                    closePicker();
+                };
+            })(r.name);
+
+            var head = document.createElement('div');
+            head.className = 'ccx-prov-head';
+            // A wrapper span with the logo inside it, never the <img> itself: the status dot is that
+            // element's ::after, and a replaced element (an <img>) renders no pseudo-elements at all —
+            // which is exactly how the dots disappeared the moment the logo stopped being a background.
+            var mark = document.createElement('span');
+            mark.className = r.icon ? 'ccx-prov-icon' : 'ccx-prov-icon ccx-prov-icon-blank';
+            // The refusal hangs off the mark the dot is drawn on: the state and the reason for it are
+            // the same thing, and a provider's own error text is a paragraph the row has no room for.
+            mark.title = r.note || (r.age ? (r.state === 'ok' ? 'answered ' : 'checked ') + r.age + ' ago' : 'never probed');
+            if (r.icon) {
+                var logo = document.createElement('img');
+                logo.className = 'ccx-prov-logo';
+                logo.src = r.icon;
+                mark.appendChild(logo);
+            }
+            var name = document.createElement('span');
+            name.className = 'ccx-prov-name';
+            name.textContent = r.name;
+            var age = document.createElement('span');
+            age.className = 'ccx-prov-age';
+            age.textContent = r.age || 'never';
+            head.appendChild(mark);
+            head.appendChild(name);
+            head.appendChild(age);
+            row.appendChild(head);
+            host.appendChild(row);
+        }
+    }
+
+    // --- The same verdicts as a sidebar section -------------------------------------------------
+    //
+    // The sessions sidebar is a second webview drawn by the same bundle, and it stacks collapsible
+    // sections: "Account & usage" (header, a View details link, and a body) then "Session manager".
+    // A provider list belongs in that stack — it is where this window's other standing state already
+    // lives — so the section is built out of the sidebar's own header markup and dropped in front of
+    // the session manager.
+    //
+    // Nothing here is copied by name. Every class carries a per-build hash (`sectionHeader_djirOA`),
+    // so the classes are lifted off the live header and the chevron is cloned from it; what the page
+    // adds is only the collapse state and the rows.
+    var COLLAPSE_KEY = 'ccx.providers.collapsed';
+
+    function sidebarPart(node, part) {
+        return node ? node.querySelector('[class*="' + part + '_"]') : null;
+    }
+
+    // The stack, identified by the two labels only it has. Returns the node the section goes in front
+    // of, plus the class names to build it out of.
+    function sidebarStack() {
+        var headers = document.querySelectorAll('[class*="sectionHeader_"]');
+        var stock = null;
+        var before = null;
+        for (var i = 0; i < headers.length; i++) {
+            var label = sidebarPart(headers[i], 'sectionLabel');
+            var text = label ? (label.textContent || '').trim().toLowerCase() : '';
+            if (text !== 'account & usage' && text !== 'session manager') continue;
+            if (!stock) stock = headers[i];
+            if (text === 'session manager' && !before) before = headers[i];
+        }
+        if (!stock || !stock.parentElement) return null;
+        return { parent: stock.parentElement, before: before || null, header: stock };
+    }
+
+    function collapsedPref() {
+        try {
+            return window.localStorage.getItem(COLLAPSE_KEY) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function rememberCollapsed(collapsed) {
+        try {
+            window.localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0');
+        } catch (e) {
+            /* a sidebar that cannot remember its fold is still a working sidebar */
+        }
+    }
+
+    function buildSidebarSection(stack) {
+        var section = document.createElement('div');
+        section.className = 'ccx-side-section';
+
+        var head = document.createElement('div');
+        head.className = stack.header.className;
+        var toggle = document.createElement('button');
+        var stockToggle = sidebarPart(stack.header, 'sectionToggle');
+        toggle.className = stockToggle ? stockToggle.className : 'ccx-side-toggle';
+        toggle.onclick = function () {
+            var next = section.getAttribute('data-ccx-open') !== '0';
+            section.setAttribute('data-ccx-open', next ? '0' : '1');
+            rememberCollapsed(next);
+        };
+
+        // The chevron is the app's own SVG, cloned: rebuilding it would mean guessing at a path that
+        // changes with their icon set. A clone carries no React handler, which is exactly what is
+        // wanted — the button above owns the click.
+        var stockChevron = sidebarPart(stack.header, 'sectionChevron');
+        var chevron = document.createElement('span');
+        chevron.className = 'ccx-side-chev';
+        if (stockChevron && stockChevron.cloneNode) chevron.appendChild(stockChevron.cloneNode(true));
+        else chevron.textContent = '›';
+        toggle.appendChild(chevron);
+
+        var label = document.createElement('span');
+        var stockLabel = sidebarPart(stack.header, 'sectionLabel');
+        label.className = stockLabel ? stockLabel.className : 'ccx-side-label';
+        label.textContent = 'Providers';
+        toggle.appendChild(label);
+        head.appendChild(toggle);
+
+        // Sits where "View details" sits on the account section, and does the same job: the full list,
+        // in the overlay, with the notes a narrow sidebar has no room for. It wears the chip the menu
+        // entry wears rather than the sidebar's own link class — the count is the same fact in both
+        // places, and it should not read as two different controls.
+        var link = document.createElement('button');
+        link.className = 'ccx-prov-tag ccx-side-link';
+        link.onclick = openHealth;
+        head.appendChild(link);
+        section.appendChild(head);
+
+        var list = document.createElement('div');
+        list.className = 'ccx-prov-list ccx-side-body';
+        section.appendChild(list);
+        section.setAttribute('data-ccx-open', collapsedPref() ? '0' : '1');
+        return section;
+    }
+
+    function decorateSidebar() {
+        try {
+            var stack = sidebarStack();
+            if (!stack) return;
+            var rows = providerRows(state.now || Date.now());
+            if (!rows.length) return;
+
+            var section = null;
+            var kids = stack.parent.children;
+            for (var i = 0; i < kids.length; i++)
+                if (String(kids[i].className).indexOf('ccx-side-section') > -1) section = kids[i];
+            if (!section) {
+                section = buildSidebarSection(stack);
+                try {
+                    stack.parent.insertBefore(section, stack.before);
+                } catch (e) {
+                    // React owns this container; a section at the end still reads correctly.
+                    stack.parent.appendChild(section);
+                }
+            }
+
+            var down = 0;
+            var known = 0;
+            for (var j = 0; j < rows.length; j++) {
+                if (rows[j].state === 'unknown') continue;
+                known++;
+                if (rows[j].state !== 'ok') down++;
+            }
+            var stamp = tallyText(rows) + '|' + rows.map(function (r) {
+                return r.name + ';' + r.state + ';' + r.age + ';' + r.note + ';' + (r.icon ? '1' : '0');
+            }).join('|');
+            if (section.getAttribute('data-ccx-stamp') === stamp) return;
+            section.setAttribute('data-ccx-stamp', stamp);
+
+            var link = section.children[0].children[1];
+            if (link) {
+                link.textContent = known ? (down ? down + ' down' : 'all ok') : 'no checks yet';
+                link.setAttribute('data-ccx-down', down ? '1' : '0');
+                link.title = 'Provider status — open the full list';
+            }
+            paintProviders(section.children[1], rows, state.active);
+        } catch (e) {
+            /* a sidebar without the section is not a broken sidebar */
+        }
+    }
+
     function watchPicker() {
         var timer = null;
         new MutationObserver(function () {
@@ -1210,6 +1581,7 @@
                     decorateSessionList();
                 decorateTranscript();
                 decorateAgentFrames();
+                decorateSidebar();
                 applyHidden();
                 watchComposerSpellcheck();
                 syncAttachmentPrompt();
@@ -2344,8 +2716,48 @@
         '.ccx-row:hover{background:var(--vscode-list-hoverBackground)}',
         '.ccx-mark{opacity:.7;width:1em}',
         '.ccx-model{margin-left:auto;opacity:.6;font-size:11px}',
-        '.ccx-prov-tag{opacity:.7;font-size:11px;padding:1px 6px;border-radius:8px;background:var(--vscode-badge-background)}',
+        '.ccx-prov-tag{opacity:.7;font-size:11px;padding:1px 6px;border-radius:8px;color:var(--vscode-badge-foreground, var(--vscode-foreground));background:var(--vscode-badge-background);border:none}',
+        '.ccx-side-link{margin-left:auto;align-self:center;cursor:pointer;font-family:var(--vscode-font-family)}',
+        '.ccx-side-link:hover{opacity:1}',
         '.ccx-model-tag{margin-left:6px;opacity:.55;font-size:10px;font-family:var(--vscode-editor-font-family, monospace)}',
+        // The provider rows sit inside a React-owned panel, so every colour here is a VS Code theme
+        // variable with a literal fallback: the section has to read as part of the panel in whatever
+        // theme is loaded, and no stock class is borrowed except the two copied off the panel itself.
+        '.ccx-prov-tally{float:right;font-size:10px;font-weight:400;letter-spacing:0;text-transform:none;opacity:.55}',
+        '.ccx-health-box{min-width:340px;padding-bottom:8px}',
+        // The sidebar section borrows the stock header markup, so only the fold and the body are new.
+        '.ccx-side-section[data-ccx-open="0"] .ccx-side-body{display:none}',
+        '.ccx-side-chev{display:flex;align-items:center;transition:transform .12s ease}',
+        '.ccx-side-section[data-ccx-open="1"] .ccx-side-chev{transform:rotate(90deg)}',
+        '.ccx-side-body{padding:0 6px 6px}',
+        // The rows sit on the sidebar surface here, so the badge ring has to be that colour instead.
+        '.ccx-side-section .ccx-prov-icon::after{box-shadow:0 0 0 2px var(--vscode-sideBar-background, var(--vscode-editorWidget-background, transparent))}',
+        '.ccx-prov-list{display:flex;flex-direction:column;gap:1px;margin-top:2px;padding:0 4px}',
+        '.ccx-prov-row{padding:4px 6px;border:1px solid transparent;border-radius:5px;cursor:pointer}',
+        '.ccx-prov-row:hover{background:var(--vscode-list-hoverBackground, rgba(128,128,128,.12))}',
+        // The bound profile is marked the way the picker marks it — the panel is read next to a tab
+        // that is running one of these, and which one it is should not need a second look.
+        '.ccx-prov-row[data-ccx-prov-active="1"]{background:var(--vscode-list-hoverBackground, rgba(128,128,128,.1));border-color:var(--vscode-widget-border, rgba(128,128,128,.28))}',
+        '.ccx-prov-head{display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.5}',
+        // var()'s fallback is what draws the placeholder: a profile with no icon file of its own never
+        // sets --ccx-icon, and the flat tint takes the same 14px slot so no row is a pixel narrower.
+        '.ccx-prov-icon{position:relative;flex:0 0 auto;width:15px;height:15px;border-radius:4px;cursor:help}',
+        // Only a profile with no icon file of its own gets the flat tint; a logo would sit on it.
+        '.ccx-prov-icon-blank{background:rgba(128,128,128,.2)}',
+        '.ccx-prov-logo{display:block;width:100%;height:100%;border-radius:4px;object-fit:contain}',
+        // The status rides on the icon rather than taking a column of its own, the way a presence dot
+        // sits on an avatar. The ring is the panel background, so it reads as a badge, not a bullet.
+        '.ccx-prov-icon::after{content:"";position:absolute;right:-3px;bottom:-3px;width:7px;height:7px;border-radius:50%;background:var(--ccx-dot, var(--vscode-descriptionForeground, rgba(128,128,128,.7)));box-shadow:0 0 0 2px var(--vscode-editorWidget-background, var(--vscode-editor-background, transparent))}',
+        '.ccx-prov-row[data-ccx-prov="ok"]{--ccx-dot:var(--vscode-charts-green, #3fb950)}',
+        '.ccx-prov-row[data-ccx-prov="failed"]{--ccx-dot:var(--vscode-charts-red, #f85149)}',
+        '.ccx-prov-row[data-ccx-prov="silent"]{--ccx-dot:var(--vscode-charts-yellow, #d29922)}',
+        // Half a day old is not a verdict about now, and a green dot that bright would say it is.
+        '.ccx-prov-row[data-ccx-prov-stale="1"] .ccx-prov-icon::after{opacity:.4}',
+        '.ccx-prov-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.ccx-prov-row[data-ccx-prov-active="1"] .ccx-prov-name{font-weight:600}',
+        '.ccx-prov-age{flex:0 0 auto;min-width:26px;text-align:right;opacity:.45;font-size:10.5px;font-variant-numeric:tabular-nums}',
+        // A provider quotes its own refusal and some of them are a paragraph long: two lines, clamped,
+        // indented under the icon so the row above stays the thing being read.
         // A frame is a block inside the tool-call node, not a floating panel: it has to read as part of
         // that call, and it has to survive the app's own reconciliation of the subtree it sits in.
         '.ccx-agent-frame{margin:4px 0 2px;border:1px solid var(--vscode-widget-border, rgba(128,128,128,.35));border-radius:6px;overflow:hidden;font:11px var(--vscode-font-family)}',

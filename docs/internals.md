@@ -713,6 +713,30 @@ What it cannot do is show an old run. `B5t`, the transcript → SDK-message conv
 outright (`if (e.isSidechain) return !1`), so a session replayed from disk comes back without any of its
 subagents' turns. Watching a run is live-only unless the `.jsonl` is read separately.
 
+### Why the provider list is an entry of its own, not a section inside Account & Usage
+
+The obvious home for it is the stock *Account & Usage* dialog, and that was the first shape: find the panel, append a section under *Usage*. It works, and it is the wrong trade.
+
+The dialog is one component (`V30` → `Sc0` in `webview/index.js`) built from a CSS-module object whose every class carries a per-build content hash: `v7 = {container:"container_JuUW3A", section:"section_JuUW3A", sectionTitle:"sectionTitle_JuUW3A", …}`. Nothing in it can be matched literally past one release. The panel can be *found* without matching them — two `<h4>` titles, "Account" and "Usage", opening sibling sections of one container, is a pair that cannot occur anywhere else on the page, and the nodes found that way also supply the class names to clone. But the container stays React's, it re-renders on its own timers (the usage fetch resolves, the retry button runs), and every added node has to be re-found and re-checked on each observer pass just to stay put.
+
+An entry in the command menu costs none of that. `registerAction(action, section, handler)` is already the extension's own public-ish surface — injection point #4 hands the registry over, and "Switch provider…" has been registered through it since the first version — so a second entry is three lines and no DOM archaeology at all. What it does need is injection point #5, which is **not** a hook but a sort order:
+
+```js
+if (J === "Model") { let Z = ["model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]; X.sort(…) }
+```
+
+`registerAction` ranks the section by that list and sends anything it does not name to the end (`indexOf` → `-1` → `Z.length`), so an entry added from the page lands below *Account & Usage* in whatever order it happened to register. Naming both ids in the array is what puts *Switch provider…* at the top of the section and *Provider status…* immediately before the stock account panel, which is the entry it reads as a companion to.
+
+The sessions sidebar is the one place where a section *is* the right shape. It is a second webview drawn by the same bundle (view id `claudeVSCodeSessionsList`), it already stacks foldable sections — `ma0`/`ca0` render "Account & usage", then "Session manager" — and each one is a header node followed by its body as a **sibling**, not a wrapper. So the page finds the stack by the only thing in it that is not hashed (those two labels), builds its own header from the live one's class names, and clones the chevron SVG rather than redrawing it: a clone carries no React handler, which is what makes it safe to hang our own `onclick` on the button around it. The fold state is ours to keep — theirs lives in `sessionSectionCollapseState`, which is written through their own message protocol — so it goes to `localStorage` under `ccx.providers.collapsed`, the one piece of state in the page that has to survive a reload without troubling the host.
+
+The data behind it is `agent-health.json`, written by a **different process** — whichever MCP run last probed a profile. Hence `watchFile` on it beside the settings and bindings watchers: a tab learns a provider went down by watching the file it lands in, not by asking.
+
+### The opening `postMessage` reaches no page
+
+`renderScript()` runs while `getHtmlForWebview` is still *building* the HTML: the webview object exists, the document does not. Anything posted from there — `attachWebview` sends the icon set and the first state — is written into a page that has not been created yet and is simply dropped.
+
+State survives that because the page asks again (`ccx:get` on boot) and every profile or settings write re-broadcasts it. The icons did not: `postIcons` is deduplicated on a stamp of the icon set, and that stamp was already set by the send nobody received, so every later call returned early. The symptom is a tab whose provider rows and session list carry no brand marks at all, in a window where the same icons render fine elsewhere — and it comes and goes with the timing of the first profile write. `ccx:get` now clears the stamp before answering: a page asking for state is a page that holds nothing.
+
 ### CSP and loading your own script
 
 `getHtmlForWebview` (line 140039) emits `script-src 'nonce-…'` (line 140070), and `localResourceRoots` is limited to the `webview/` and `resources/` directories inside the extension. An external file cannot be referenced by URI — hence the custom code is inlined into the HTML with their nonce, while the text itself is read from disk when the page is generated (so edits apply without re-patching).

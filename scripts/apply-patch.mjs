@@ -109,10 +109,15 @@ const PATCHES = [
         where: 'replace',
     },
     {
+        // Not a hook — a sort order. registerAction() ranks the "Model" section by this list and puts
+        // anything it does not name at the end, so an entry added from the page would otherwise land
+        // below Account & Usage in whatever order it happened to register. "Switch provider…" opens
+        // the section; "Provider status…" sits beside the stock account panel, which is the entry it
+        // reads as a companion to.
         file: 'webview/index.js',
         find: '["model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]',
         replace:
-            '["ccx-provider","model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]/*__ccx*/',
+            '["ccx-provider","model","effort-level","toggle-thinking","switch-models-on-flag","ccx-health","account-usage"]/*__ccx*/',
         where: 'replace',
     },
     // --- Search sessions by content, and pinned sessions (four hooks in one component) -----------

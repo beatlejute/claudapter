@@ -15,6 +15,7 @@ const ICONS_DIR = path.join(DIR, 'icons');
 const BINDINGS_FILE = path.join(DIR, 'bindings.json');
 const HIDDEN_FILE = path.join(DIR, 'hidden-messages.json');
 const PINNED_FILE = path.join(DIR, 'pinned.json');
+const HEALTH_FILE = path.join(DIR, 'agent-health.json');
 const ICON_EXTENSIONS = ['png', 'svg'];
 // An icon is inlined into the webview as base64 — past this size it is a mistake, not an icon
 const MAX_ICON_BYTES = 512 * 1024;
@@ -1032,9 +1033,81 @@ function attachmentPrompts() {
     return out;
 }
 
+// --- Provider health ---------------------------------------------------------------------------
+//
+// The MCP server probes a profile before it delegates to it and records the verdict in
+// agent-health.json — one entry per profile, overwritten by the next probe. That file is the only
+// place in the install where "this provider answered / refused / never replied" is written down, so
+// the account panel reads it instead of probing again: a panel that opened a connection per provider
+// every time it rendered would spend real quota to draw a row.
+//
+// Nothing here claims to be true *now*. An entry says what happened at `at`, which is why the stamp
+// travels with it and the page draws an old verdict as old rather than as green.
+function providerHealth() {
+    const raw = readJson(HEALTH_FILE);
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+}
+
+// One entry, trimmed to what a row can show. `message` is the provider's own error text and has no
+// bound — the page gets a slice of it, never the whole body.
+function healthFor(name, health) {
+    const h = health[name];
+    if (!h || typeof h !== 'object' || typeof h.at !== 'string') return null;
+    const at = Date.parse(h.at);
+    if (!Number.isFinite(at)) return null;
+    const resets = typeof h.resets_at === 'string' ? Date.parse(h.resets_at) : NaN;
+    return {
+        at,
+        ok: Boolean(h.ok),
+        // A probe that could not connect is not a provider that refused. Kept apart because the two
+        // send the reader to different places: one to the adapter, the other to the account.
+        unreachable: Boolean(h.unreachable),
+        status: Number.isFinite(h.status) ? h.status : null,
+        message: typeof h.message === 'string' ? h.message.slice(0, 200) : '',
+        resetsAt: Number.isFinite(resets) ? resets : null,
+        // What the probe actually reached, which is not always what the profile asks for
+        model: typeof h.model === 'string' ? h.model : '',
+    };
+}
+
+// Where a profile sends its requests, in the words a row has room for.
+function endpointOf(name, env) {
+    const base = env.ANTHROPIC_BASE_URL || '';
+    if (!base) return 'Anthropic subscription';
+    const port = localProxyPort(name);
+    try {
+        const url = new URL(base);
+        // The adapter's first path segment names the upstream it fronts (/codex, /glm, …) — the one
+        // thing `127.0.0.1:8787` does not say, and the only part of the URL worth the space.
+        if (port) {
+            const upstream = url.pathname.split('/').filter(Boolean)[0];
+            return upstream ? `adapter :${port} · ${upstream}` : `adapter :${port}`;
+        }
+        return url.host;
+    } catch {
+        return base;
+    }
+}
+
+// A profile is a JSON file nothing in this UI edits, so "open the profile" means exactly that: hand
+// the path to VS Code and let the editor own it. The name comes off a page message, so it is checked
+// against the profile list rather than pasted into a path — a webview must never be able to name an
+// arbitrary file for the host to open.
+function openProfileFile(name) {
+    if (typeof name !== 'string' || !listProfiles().includes(name)) return false;
+    try {
+        vscode.window.showTextDocument(vscode.Uri.file(path.join(PROFILES_DIR, `${name}.json`)));
+        return true;
+    } catch (e) {
+        dlog('open profile failed', e.message);
+        return false;
+    }
+}
+
 function stateFor(sessionId, webview) {
     const profiles = listProfiles();
     const active = effectiveProfile(sessionId, webview);
+    const health = providerHealth();
     return {
         // A weak id stays on the host. The page adopts whatever arrives here as state.sessionId and
         // hands it straight back on ccx:apply as the id to resume — so a weak one would leave here as
@@ -1049,12 +1122,17 @@ function stateFor(sessionId, webview) {
         // Not about this tab's session — the whole list, since the history list is what reads it
         pinnedSessions: loadPinned(),
         models: active && active !== 'claude' ? modelsOf(active) : null,
+        // `now` rather than a per-row Date.now(): every age in the panel is then measured from the
+        // same instant, so two rows probed together never read as a minute apart.
+        now: Date.now(),
         profiles: profiles.map((name) => {
             const env = profileEnv(name);
             return {
                 name,
                 model: modelOf(env),
                 baseUrl: env.ANTHROPIC_BASE_URL || '',
+                endpoint: endpointOf(name, env),
+                health: healthFor(name, health),
             };
         }),
     };
@@ -1444,6 +1522,9 @@ function ensureWatchers() {
     if (!S.settingsWatcher) S.settingsWatcher = watchFile(SETTINGS_FILE, broadcast);
     if (!S.bindingsWatcher) S.bindingsWatcher = watchFile(BINDINGS_FILE, broadcast);
     if (!S.profilesWatcher) S.profilesWatcher = watchDir(PROFILES_DIR, broadcast);
+    // Written by a different process — the MCP server, from whichever run happens to probe next — so
+    // the panel only ever learns a provider went down by watching the file it lands in.
+    if (!S.healthWatcher) S.healthWatcher = watchFile(HEALTH_FILE, broadcast);
     if (!S.extensionsWatcher) {
         // An extension install writes a whole tree and then renames it into place, so the burst is long
         // — 200 ms would spawn the patcher at a half-written folder
@@ -1536,6 +1617,13 @@ function attachWebview(webview) {
 
         const sessionId = webview.__ccxSessionId || m.sessionId || null;
         if (m.type === 'ccx:get') {
+            // The icon set is sent once per webview and then only when it changes — but the first
+            // send happens in renderScript(), while the HTML is still being built and no page exists
+            // to receive it. That message is dropped, the stamp is not, and every later postIcons()
+            // then returns early: a tab that missed the opening send would never see a brand mark
+            // again. ccx:get is the page saying it has just started and holds nothing, so the stamp
+            // goes with it.
+            webview.__ccxIconStamp = null;
             postIcons(webview);
             post(webview, { type: 'ccx:state', ...stateFor(sessionId, webview) });
             // A tab that opens while a run is already going gets its frame filled in rather than
@@ -1604,6 +1692,8 @@ function attachWebview(webview) {
                 // Every tab draws the same history list, so all of them have to be told.
                 broadcast();
             }
+        } else if (m.type === 'ccx:openProfile') {
+            openProfileFile(m.name);
         } else if (m.type === 'ccx:hideMessages') {
             const id = m.sessionId || sessionId;
             if (id) {

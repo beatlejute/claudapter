@@ -388,6 +388,22 @@ async function preflight(env, requestedModel, profile) {
     const model = probeModel(env, requestedModel);
     if (!model) return null;
 
+    // A header value has to be Latin-1. fetch() builds the Headers object before it opens a socket,
+    // so a credential carrying a Cyrillic character — almost always a placeholder like "sk-ЗАМЕНИТЕ…"
+    // left in the profile — never reaches the network, and the TypeError it throws instead reads as a
+    // protocol bug ("Cannot convert argument to a ByteString because the character at index 3 has a
+    // value of 1047") rather than as an unfilled field. Answering it here costs one scan of a string
+    // this function was about to send anyway.
+    const offending = [...key].findIndex((c) => c.codePointAt(0) > 0xff);
+    if (offending > -1) {
+        const which = env.ANTHROPIC_API_KEY ? 'ANTHROPIC_API_KEY' : 'ANTHROPIC_AUTH_TOKEN';
+        // The value itself never travels: a credential is not something to quote back, and the
+        // position alone says which character to look at.
+        const message = `${which} is not a usable key — character ${offending + 1} is outside Latin-1, so ~/.claude/profiles/${profile}.json still holds a placeholder`;
+        recordHealth(profile, { ok: false, message, model });
+        return message;
+    }
+
     const verdict = await probeOnce(
         env,
         `${base}/v1/messages`,
@@ -1086,7 +1102,12 @@ async function execute(ctx, task) {
         throw new Error(`the "${profile}" agent produced no result (exit ${outcome.code})${detail ? `: ${detail}` : ''}`);
     }
 
-    recordHealth(profile, { ok: !payload.is_error, model, via: 'run' });
+    // The alias the run asked for ("sonnet") is not what answered: the profile redirects it, and a
+    // health row saying `sonnet` for a codex endpoint reads as a misconfigured profile. Preflight
+    // records the served id, so a run has to as well — falling back to the alias only when the result
+    // carries no per-model usage at all.
+    const servedModel = usageTotals(payload).perModel.map((r) => r.model).filter(Boolean)[0] || model;
+    recordHealth(profile, { ok: !payload.is_error, model: servedModel, via: 'run' });
     recordBinding(payload.session_id, profile);
     recordSession(payload.session_id, { profile, cwd, model, mode, turns: payload.num_turns ?? null });
 

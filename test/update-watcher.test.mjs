@@ -110,7 +110,16 @@ function calls() {
 
 function closeWatchers() {
     const state = globalThis.__ccxState || {};
-    for (const key of ['extensionsWatcher', 'agentRunsWatcher', 'settingsWatcher', 'bindingsWatcher', 'profilesWatcher'])
+    // Every watcher ensureWatchers() can install: one left open holds the event loop, and the run
+    // then ends in a timeout with every assertion above it already passed.
+    for (const key of [
+        'extensionsWatcher',
+        'agentRunsWatcher',
+        'settingsWatcher',
+        'bindingsWatcher',
+        'profilesWatcher',
+        'healthWatcher',
+    ])
         try {
             state[key]?.close();
         } catch {}
