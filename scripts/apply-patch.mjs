@@ -68,7 +68,7 @@ const PATCHES = [
         // keeps the enclosing `if(` arity intact, `;` on 2.1.227+ closes the bare statement.
         //
         // 2.1.245 put `$`-prefixed names into extension.js for the first time, so every class here is
-        // `[w$]+` rather than `w+` — the same widening points #4 and #6–#8 already needed in the webview
+        // `[w$]+` rather than `w+` — the same widening points #4 and #6–#9 already needed in the webview
         // bundle. It has not bitten this signature yet (2.1.245 is `q.env=Z;`), but it broke #1 and #2.
         //
         // The resume id is read off the options object (`resume:t`) instead of the parameter, which is renamed too.
@@ -93,7 +93,7 @@ const PATCHES = [
         //
         // Two things here were name-shaped rather than structural until 2.1.239. The helper calls were
         // `\w+`, and 2.1.239 renamed the claudeConfig one to `$b` — `\w` does not match `$`, so the whole
-        // signature dropped to zero hits, the same trap points #6–#8 already document. And the jsx factory
+        // signature dropped to zero hits, the same trap points #6–#9 already document. And the jsx factory
         // was written into the replacement as a literal `b`; it has been `b` in every release seen so far,
         // but a rename would have produced a ReferenceError at render time rather than a patch-time error.
         // It is now captured off the `trailingComponent:` expression that follows, three literal strings
@@ -115,12 +115,12 @@ const PATCHES = [
             '["ccx-provider","model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]/*__ccx*/',
         where: 'replace',
     },
-    // --- Search sessions by content, and pinned sessions (three hooks in one component) ----------
+    // --- Search sessions by content, and pinned sessions (four hooks in one component) -----------
     //
     // The stock search box only matches a row's title and git branch, both computed client-side. A
     // query the user actually typed to find a conversation is usually neither — it is something that
     // was SAID — so this adds a second, lazy pass over the transcript itself, run on the host. All
-    // three anchors sit in the same component (the one rendering "Search sessions…"), captured
+    // four anchors sit in the same component (the one rendering "Search sessions…"), captured
     // structurally because a `$`-prefixed parameter name (`$e`) needs `[\w$]+`, not `\w+`, to survive
     // the round trip; a plain `\w+` silently fails to match on this component and nowhere else.
     {
@@ -149,32 +149,44 @@ const PATCHES = [
         // The title/branch filter itself: OR in a content match, and expose the unfiltered candidate
         // list globally in the same expression — the onChange hook below needs it, and this is the one
         // place its variable name (`te`, but renamed on every release) is already in scope and captured.
-        //
-        // The result then goes through pinSort, which orders the list by pin first and then by how
-        // alive the session is. This is the list the app renders AND the one it builds its
-        // keyboard-navigation index from, so sorting it here — rather than moving rows in the DOM —
-        // keeps arrow keys agreeing with what is on screen, and survives every re-render because it
-        // is part of the render.
-        //
-        // The sort cannot sit where the filter is, though. Telling an idle open session from a closed
-        // one needs the component's own openState accessor, and that is declared some 400 bytes
-        // further down the same `let` chain. So this signature spans both — the filter, whatever the
-        // minifier left between them (nothing that touches the list), the accessor itself, and the
-        // declaration that follows it — and the sort is spliced in between the two halves as a plain
-        // assignment. A second `${result}=` inside the same `let` would be a duplicate declaration,
-        // hence the `;` and the fresh `let` for the rest of the chain.
         file: 'webview/index.js',
-        find: /([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3([\s\S]{0,700}?)(,([\w$]+)=[\w$]+\(\([\w$]+\)=>\{if\(![\w$]+\)return;let [\w$]+=[\w$]+\([\w$]+\.sessionId\.value,[\w$]+\.isRemote\.value\);return [\w$]+\([\w$]+!==void 0&&[\w$]+\.has\([\w$]+\),[\w$]+\.busy\.value,[\w$]+\.pendingInput\.value\)\},\[[\w$]+\]\)),\[([\w$]+),([\w$]+)\]=([\w$]+)\(\(\)=>new Set\)/,
-        replace: (_found, result, query, source, item, lowerQ, titleFn, between, openDecl, openState, seen, setSeen, useState) =>
+        find: /([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3/,
+        replace: (_found, result, query, source, item, lowerQ, titleFn) =>
             `${result}=(globalThis.__ccxSearchCandidates=${source},` +
             `${query}?${source}.filter((${item})=>{` +
             `let ${lowerQ}=${query}.toLowerCase();return ${titleFn}(${item}).toLowerCase().includes(${lowerQ})||` +
             `(${item}.gitBranch.value?.toLowerCase().includes(${lowerQ})??!1)||` +
-            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)}):${source})` +
-            `${between}${openDecl};` +
-            `${result}=globalThis.__ccx&&globalThis.__ccx.pinSort` +
-            `?globalThis.__ccx.pinSort(${result},ccxPinnedIds,${openState}):${result};` +
-            `let [${seen},${setSeen}]=${useState}(()=>new Set)`,
+            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)}):${source})`,
+        where: 'replace',
+    },
+    {
+        // pinSort orders the list by pin first and then by how alive the session is. This is the list
+        // the app renders AND the one it builds its keyboard-navigation index from, so sorting it here
+        // — rather than moving rows in the DOM — keeps arrow keys agreeing with what is on screen, and
+        // survives every re-render because it is part of the render.
+        //
+        // Through 2.1.252 the sort rode along in #7's signature, spliced onto the filter's own result
+        // across a 700-byte gap, because the accessor it needs was that far down the same `let` chain.
+        // 2.1.257 ended that arrangement: the app no longer renders the filter's result. A memo now
+        // sits between them and partitions open sessions to the front (`[...open,...rest]`, stable
+        // within each half), and the grouping call takes THAT memo — so the sort has to reassign the
+        // memo, not the filter. Sorting the filter's result would be discarded a line later.
+        //
+        // Which is convenient: the memo and the accessor are adjacent in the chain, so this is a short
+        // anchor instead of a long one, and #7 goes back to being only about the filter.
+        //
+        // The stock partition is a coarser version of the same idea — open first, everything else
+        // after, no pins and no running/idle distinction — and pinSort re-blocks its output into all
+        // four ranks, so the two compose rather than fight.
+        //
+        // 2.1.257 also gave the accessor a fourth state, "unread", read from a second id set beside
+        // the open one. Both sets are captured, so renaming either costs nothing here.
+        file: 'webview/index.js',
+        find: /,([\w$]+)=[\w$]+\(\(\)=>\{if\(!([\w$]+)\)return ([\w$]+);return [\w$]+\(\3,\(([\w$]+)\)=>[\w$]+\(\4\)===!0\)\},\[\3,\2,[\w$]+\]\),([\w$]+)=[\w$]+\(\(([\w$]+)\)=>\{if\(!\2&&!([\w$]+)\)return;[\s\S]{0,400}?return [\w$]+\([\w$]+\(\2\),\6\.busy\.value,\6\.pendingInput\.value,[\w$]+\(\7\)\)\},\[\2,\7\]\)/,
+        replace: (found, sorted, _openIds, _filtered, _memoItem, openState) =>
+            found +
+            `,ccxPinSorted=(${sorted}=globalThis.__ccx&&globalThis.__ccx.pinSort` +
+            `?globalThis.__ccx.pinSort(${sorted},ccxPinnedIds,${openState}):${sorted})`,
         where: 'replace',
     },
     {

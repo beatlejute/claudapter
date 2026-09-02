@@ -368,7 +368,18 @@ assert.deepEqual(
     'every block must keep the app\'s own order',
 );
 
-// 29. The accessor is the app's, so a throw from it is not the sort's business: the row's own signals
+// 29. 2.1.257 gave the accessor a fourth state. An open session holding unread output reports
+//     "unread" rather than "idle" — so does a closed one — and both have something to show, which is
+//     what this sort orders by. "unread" therefore ranks with the open-but-idle block instead of
+//     falling through to the closed one.
+const U1 = live('eeeeeeee-1111-4222-8333-444444444444', 'idle');
+assert.deepEqual(
+    ccx.pinSort([I2, U1, R1], pinState, (x) => (x === U1 ? 'unread' : dot.get(x))),
+    [R1, U1, I2],
+    'an unread session must outrank one with nothing to show',
+);
+
+// 30. The accessor is the app's, so a throw from it is not the sort's business: the row's own signals
 //     stand in and the list is still ordered rather than dropped.
 assert.deepEqual(
     ccx.pinSort([I1, R1], pinState, () => {
@@ -386,12 +397,12 @@ const patcher = readFileSync(new URL('../scripts/apply-patch.mjs', import.meta.u
 assert.ok(/onPinState\(ccxSetPinnedIds\)/.test(patcher), 'the pin state hook must be handed to onPinState');
 assert.ok(/\[ccxPinnedIds,ccxSetPinnedIds\]=\$\{useState\}\(null\)/.test(patcher), 'the pin state pair must be declared');
 assert.ok(
-    /pinSort\(\$\{result\},ccxPinnedIds,\$\{openState\}\)/.test(patcher),
+    /pinSort\(\$\{\w+\},ccxPinnedIds,\$\{openState\}\)/.test(patcher),
     'the rendered list must go through pinSort, carrying the openState accessor',
 );
 assert.ok(
-    /\$\{between\}\$\{openDecl\};/.test(patcher),
-    'the sort must be spliced in after the accessor, not inside the let chain',
+    /,ccxPinSorted=\(\$\{sorted\}=globalThis/.test(patcher),
+    'the sort must be appended after the accessor it captures, inside the same let chain',
 );
 const page = readFileSync(new URL('../src/webview.js', import.meta.url), 'utf8');
 assert.ok(/onPinState: onPinState/.test(page) && /pinSort: pinSort/.test(page), 'window.__ccx must expose both hooks');

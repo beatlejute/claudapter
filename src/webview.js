@@ -650,11 +650,15 @@
     // starting ever reorders anything else.
     //
     // Four blocks, and the middle two are the row's own status dot: the third argument is the
-    // component's accessor for it (openState — "waiting" / "running" / "idle", and nothing at all for
-    // a session that is not open in a tab), the same function that decides whether the dot is drawn
-    // green, grey, or not drawn. Sorting by the dot rather than by the raw signals is what puts an
-    // open-but-idle session above a closed one: idle and closed differ only by the openSessionIds
-    // prop, which the accessor closes over.
+    // component's accessor for it (openState — "waiting" / "running" / "idle" / "unread", and nothing
+    // at all for a session that is neither open in a tab nor holding unread output), the same function
+    // that decides whether the dot is drawn green, grey, or not drawn. Sorting by the dot rather than
+    // by the raw signals is what puts an open-but-idle session above a closed one: idle and closed
+    // differ only by the openSessionIds prop, which the accessor closes over.
+    //
+    // "unread" arrived in 2.1.257 and is returned for an open session as well as a closed one — an
+    // open idle session with unread output reports "unread", not "idle". Treating it as anything but
+    // block 2 would therefore sink open sessions to the bottom, which is the opposite of the point.
     //
     // Without the accessor — an older patcher, or a bundle whose openSessionIds memo has moved — the
     // raw busy/pendingInput signals still separate the running rows from the rest, so the sort
@@ -686,7 +690,8 @@
         }
     }
 
-    // 0 pinned, 1 running a turn or waiting for input, 2 open in a tab but idle, 3 not open at all.
+    // 0 pinned, 1 running a turn or waiting for input, 2 open in a tab but idle or holding unread
+    // output, 3 neither.
     function sessionRank(session, pins, openState) {
         var id = session && session.sessionId && session.sessionId.value;
         if (id && pins && pins.size && pins.has(id)) return 0;
@@ -699,7 +704,7 @@
             }
         }
         if (dot === 'running' || dot === 'waiting') return 1;
-        if (dot === 'idle') return 2;
+        if (dot === 'idle' || dot === 'unread') return 2;
         // No dot at all, or a state this version has never heard of: fall back to the two signals the
         // dot is drawn from, which are on the row whether or not the accessor reached us.
         var busy = session && session.busy && session.busy.value === true;
