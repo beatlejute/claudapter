@@ -16,7 +16,7 @@
         window.acquireVsCodeApi = function () { return proxy; };
     }
 
-    var state = { profiles: [], active: null, sessionId: null, bindings: {}, selectedModel: null, effortLevel: null };
+    var state = { profiles: [], active: null, sessionId: null, bindings: {} };
     var icons = {};
     var fallback = null;
     var registry = null;
@@ -222,8 +222,6 @@
                 active: d.active || null,
                 models: d.models || null,
                 bindings: d.bindings || {},
-                selectedModel: d.selectedModel || null,
-                effortLevel: d.effortLevel || null,
                 sessionId: d.sessionId || state.sessionId,
             };
             adoptAttachmentPrompts(d.attachmentPrompts);
@@ -243,7 +241,6 @@
             syncAction();
             syncChip();
             decorateModelPicker();
-            decorateModelAndEffort();
             decorateSessionList();
             decorateTranscript();
             decorateAgentFrames();
@@ -316,28 +313,6 @@
         });
     }
 
-    // The indicator is an inert DOM sibling in the composer's toolbar row, restored after React commits
-    // by the existing observer. Changing model and effort stays the job of the stock controls and slash
-    // commands.
-    function selectedModelLabel(model) {
-        if (typeof model !== 'string' || !model.trim()) return 'Auto';
-        // the session signals carry raw ids, not labels: a selection is a family alias with the context
-        // suffix attached ("opus[1m]"), while the main loop reports a full id ("claude-opus-5[1m]",
-        // "claude-haiku-4-5-20251001"). The suffix is stripped, then the family is read out of an
-        // Anthropic id; anything else is another provider's own model name, which has no family to read
-        // and is the honest label for itself.
-        var value = model.trim().replace(/\[[^\]]*\]$/, '').trim();
-        var aliases = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable' };
-        var exact = aliases[value.toLowerCase()];
-        if (exact) return exact;
-        var family = /^(?:[\w.]*anthropic[\w.]*\.)?claude-(opus|sonnet|haiku|fable)\b/i.exec(value);
-        return family ? aliases[family[1].toLowerCase()] : value;
-    }
-
-    function liveUltracode() {
-        return sessionField('ultracodeEnabled') === true;
-    }
-
     // The values the composer actually shows are the session's live signals, not settings.json — that
     // file only holds the defaults, so it names whatever chat last changed /model or /effort, which is
     // exactly the "not this chat" complaint. A fresh session reports undefined until the user picks, and
@@ -350,157 +325,6 @@
         } catch (e) {
             return undefined;
         }
-    }
-
-    // The model THIS chat is actually on — which is not always the one that was picked. The CLI can
-    // serve something else (a limit or capacity downgrade), and `currentMainLoopModel` is the live
-    // process reporting what it is really running, so it goes first; leading with `modelSelection`
-    // showed `Opus` through a session whose main loop was `claude-fable-5`, which is the one case the
-    // chip exists for. The selection is the fallback for the window before the CLI has said anything,
-    // and `lastServedModel` comes last because a resume fills it by replaying the transcript, so it
-    // names the previous provider's model until the new one answers. settings.json is deliberately not
-    // consulted — its `model` is a global default, not this session's value, and surfacing it is
-    // exactly the "not this chat" complaint.
-    function liveModel() {
-        var sources = ['currentMainLoopModel', 'modelSelection', 'lastServedModel'];
-        for (var i = 0; i < sources.length; i++) {
-            var m = sessionField(sources[i]);
-            if (typeof m === 'string' && m.trim() && m.trim() !== 'default' && m.trim() !== 'auto')
-                return m.trim();
-        }
-        return null;
-    }
-
-    function liveEffort() {
-        var e = sessionField('effortLevel');
-        return typeof e === 'string' && e.trim() ? e.trim() : null;
-    }
-
-    // The label belongs in the composer's toolbar row, left of the mode picker ("Auto"), not on a line
-    // of its own — a bare child of the fieldset gets stretched into a full-width bar by its column flex.
-    // The row always ends with the submit button, and the mode picker is the node right before it, so
-    // inserting before that sibling lands the label beside "Auto" in the same flex row. When the row is
-    // missing the fieldset itself is the fallback anchor.
-    function findIndicatorAnchor() {
-        var composers = document.querySelectorAll('fieldset[data-permission-mode]');
-        for (var i = 0; i < composers.length; i++) {
-            var composer = composers[i];
-            if (composer.offsetParent === null) continue;
-            var send = composer.querySelector('button[type="submit"]');
-            if (send && send.parentElement)
-                return { parent: send.parentElement, before: send.previousElementSibling || send };
-            return { parent: composer, before: null };
-        }
-        return null;
-    }
-
-    function describeEl(el) {
-        if (!el) return null;
-        return {
-            tag: el.tagName,
-            cls: typeof el.className === 'string' ? el.className.slice(0, 120) : '',
-            text: (el.textContent || '').trim().slice(0, 60),
-            perm: el.getAttribute ? el.getAttribute('data-permission-mode') : null,
-            spark: el.getAttribute ? el.getAttribute('data-spark') : null,
-        };
-    }
-
-    // Throttled, capped diagnostic: the settled DOM is what matters, not the first paint, so this
-    // re-fires (debounced) a handful of times and the last one is the truth.
-    function debugDump(reason) {
-        if (!sessionObj) return;
-        window.__ccxDumpN = (window.__ccxDumpN || 0) + 1;
-        if (window.__ccxDumpN > 25) return;
-        var fieldsets = [];
-        document.querySelectorAll('fieldset[data-permission-mode]').forEach(function (f) {
-            fieldsets.push({
-                visible: f.offsetParent !== null,
-                cls: typeof f.className === 'string' ? f.className.slice(0, 120) : '',
-                perm: f.getAttribute('data-permission-mode'),
-                spark: f.getAttribute('data-spark'),
-                legends: Array.prototype.map.call(f.querySelectorAll('legend'), describeEl),
-            });
-        });
-        var permEls = [];
-        document.querySelectorAll('[data-permission-mode]').forEach(function (el) {
-            permEls.push(describeEl(el));
-        });
-        var labels = [];
-        var wanted = ['Auto', 'Default', 'Opus', 'Sonnet', 'Haiku', 'Fable', 'xhigh', 'max'];
-        document.querySelectorAll('body *').forEach(function (el) {
-            if (labels.length >= 40 || el.offsetParent === null) return;
-            if (el.children && el.children.length > 0) return;
-            var t = (el.textContent || '').trim();
-            if (!t) return;
-            var hit = false;
-            for (var i = 0; i < wanted.length; i++) {
-                if (t === wanted[i] || t.indexOf('Effort:') === 0) { hit = true; break; }
-            }
-            if (!hit) return;
-            var r = el.getBoundingClientRect();
-            labels.push({
-                tag: el.tagName,
-                cls: typeof el.className === 'string' ? el.className.slice(0, 100) : '',
-                text: t.slice(0, 40),
-                x: Math.round(r.x),
-                y: Math.round(r.y),
-            });
-        });
-        var cfg = null;
-        try {
-            var c = sessionObj.config && sessionObj.config.value;
-            if (c) cfg = { modelSetting: c.modelSetting, modelCount: c.models ? c.models.length : 0 };
-        } catch (e) {}
-        send({
-            type: 'ccx:debug',
-            n: window.__ccxDumpN,
-            reason: reason,
-            dump: {
-                modelSelection: sessionField('modelSelection'),
-                lastServedModel: sessionField('lastServedModel'),
-                currentMainLoopModel: sessionField('currentMainLoopModel'),
-                effortLevel: liveEffort(),
-                ultracodeEnabled: liveUltracode(),
-                permissionMode: sessionField('permissionMode'),
-                fastModeState: sessionField('fastModeState'),
-                settingsModel: state.selectedModel,
-                settingsEffort: state.effortLevel,
-                profile: state.active,
-                config: cfg,
-                fieldsets: fieldsets,
-                permEls: permEls,
-                labels: labels,
-            },
-        });
-    }
-
-    var debugDumpTimer = null;
-    function scheduleDebugDump(reason) {
-        clearTimeout(debugDumpTimer);
-        debugDumpTimer = setTimeout(function () { debugDump(reason); }, 700);
-    }
-
-    function decorateModelAndEffort() {
-        scheduleDebugDump('decorate');
-        var model = liveModel();
-        var label =
-            selectedModelLabel(model) + ' · ' + (liveUltracode() ? 'ultracode' : liveEffort() || 'Auto');
-        var anchor = findIndicatorAnchor();
-        var indicators = document.querySelectorAll('.ccx-model-effort');
-        for (var i = 0; i < indicators.length; i++) {
-            if (!anchor || indicators[i].parentElement !== anchor.parent) indicators[i].remove();
-        }
-        if (!anchor) return;
-
-        var indicator = anchor.parent.querySelector(':scope > .ccx-model-effort');
-        if (!indicator) {
-            indicator = document.createElement('span');
-            indicator.className = 'ccx-model-effort';
-            indicator.title = 'Selected model and reasoning effort';
-            if (anchor.before) anchor.parent.insertBefore(indicator, anchor.before);
-            else anchor.parent.appendChild(indicator);
-        }
-        indicator.textContent = label;
     }
 
     // The session id is nowhere in the DOM: the history row is a bare <button> whose entire prop object
@@ -1383,8 +1207,7 @@
             clearTimeout(timer);
             timer = setTimeout(function () {
                 decorateModelPicker();
-                decorateModelAndEffort();
-                decorateSessionList();
+                    decorateSessionList();
                 decorateTranscript();
                 decorateAgentFrames();
                 applyHidden();
@@ -2549,7 +2372,6 @@
         '.ccx-agent-child{margin:4px 0 2px;padding:2px 0 2px 6px;border-left:2px solid var(--vscode-textLink-foreground, currentColor);opacity:.8;font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
         '.ccx-agent-child::before{content:"↳ ";font-style:normal;opacity:.7}',
         '.ccx-agent-idle{opacity:.45;font-style:italic}',
-        '.ccx-model-effort{display:inline-flex;align-items:center;flex:0 0 auto;padding:0 8px;border-radius:8px;background:var(--vscode-badge-background, transparent);color:var(--vscode-descriptionForeground, var(--vscode-foreground));font:11px var(--vscode-font-family);line-height:18px;opacity:.9;pointer-events:none;user-select:none;white-space:nowrap}',
         // The row is display:flex;align-items:center;gap:8px, so ::before simply becomes its leading flex
         // item and the flex:1 title still ellipsizes. No child node, so nothing for React to reconcile.
         'button[data-ccx-provider]::before{content:"";flex:0 0 auto;width:13px;height:13px;margin-right:-3px;border-radius:3px;background-image:var(--ccx-icon);background-size:contain;background-position:center;background-repeat:no-repeat;opacity:.9}',
@@ -2608,7 +2430,6 @@
     watchSelection();
     if (document.body) {
         syncChip();
-        decorateModelAndEffort();
         decorateSessionList();
         decorateTranscript();
         watchComposerSpellcheck();
@@ -2616,7 +2437,6 @@
     } else {
         document.addEventListener('DOMContentLoaded', function () {
             syncChip();
-            decorateModelAndEffort();
             decorateSessionList();
             decorateTranscript();
             watchComposerSpellcheck();
