@@ -68,7 +68,7 @@ const PATCHES = [
         // keeps the enclosing `if(` arity intact, `;` on 2.1.227+ closes the bare statement.
         //
         // 2.1.245 put `$`-prefixed names into extension.js for the first time, so every class here is
-        // `[w$]+` rather than `w+` — the same widening points #4 and #6–#9 already needed in the webview
+        // `[w$]+` rather than `w+` — the same widening points #4 and #6–#10 already needed in the webview
         // bundle. It has not bitten this signature yet (2.1.245 is `q.env=Z;`), but it broke #1 and #2.
         //
         // The resume id is read off the options object (`resume:t`) instead of the parameter, which is renamed too.
@@ -93,7 +93,7 @@ const PATCHES = [
         //
         // Two things here were name-shaped rather than structural until 2.1.239. The helper calls were
         // `\w+`, and 2.1.239 renamed the claudeConfig one to `$b` — `\w` does not match `$`, so the whole
-        // signature dropped to zero hits, the same trap points #6–#9 already document. And the jsx factory
+        // signature dropped to zero hits, the same trap points #6–#10 already document. And the jsx factory
         // was written into the replacement as a literal `b`; it has been `b` in every release seen so far,
         // but a rename would have produced a ReferenceError at render time rather than a patch-time error.
         // It is now captured off the `trailingComponent:` expression that follows, three literal strings
@@ -120,12 +120,12 @@ const PATCHES = [
             '["ccx-provider","model","effort-level","toggle-thinking","switch-models-on-flag","ccx-health","account-usage"]/*__ccx*/',
         where: 'replace',
     },
-    // --- Search sessions by content, and pinned sessions (four hooks in one component) -----------
+    // --- Search sessions by content, and pinned sessions (five hooks in one component) -----------
     //
     // The stock search box only matches a row's title and git branch, both computed client-side. A
     // query the user actually typed to find a conversation is usually neither — it is something that
     // was SAID — so this adds a second, lazy pass over the transcript itself, run on the host. All
-    // four anchors sit in the same component (the one rendering "Search sessions…"), captured
+    // five anchors sit in the same component (the one rendering "Search sessions…"), captured
     // structurally because a `$`-prefixed parameter name (`$e`) needs `[\w$]+`, not `\w+`, to survive
     // the round trip; a plain `\w+` silently fails to match on this component and nowhere else.
     {
@@ -140,28 +140,57 @@ const PATCHES = [
         // Pinning has to be state rather than a value the page reads at render time: nothing in the
         // component re-runs when a pin is toggled, so without a state write the list would keep its
         // old order until something else happened to re-render it.
+        //
+        // 2.1.259 slid two more declarations between the query state and the rename state — the new
+        // session filter (`[M1,c]=Y1(by)`) and the predicate derived from it (`_1=IJ0(M1)`). The three
+        // used to be adjacent, so the signature simply named them in a row; now it carries a lazy gap
+        // that is captured and re-emitted verbatim. Anchoring on the pair that still brackets the
+        // insertion keeps the match unique — a bare `useState("")` is not.
         file: 'webview/index.js',
-        find: /,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=([\w$]+)\(new Map\)/,
-        replace: (_found, query, setQuery, useState, renaming, setRenaming, refs, useRef) =>
+        find: /,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),([\s\S]{0,160}?)\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=([\w$]+)\(new Map\)/,
+        replace: (_found, query, setQuery, useState, between, renaming, setRenaming, refs, useRef) =>
             `,[${query},${setQuery}]=${useState}(""),[ccxContentMatches,ccxSetContentMatches]=${useState}(null),` +
             `[ccxPinnedIds,ccxSetPinnedIds]=${useState}(null),` +
             `ccxHandoff=(globalThis.__ccx&&globalThis.__ccx.onSearchState&&globalThis.__ccx.onSearchState(ccxSetContentMatches)),` +
             `ccxPinHandoff=(globalThis.__ccx&&globalThis.__ccx.onPinState&&globalThis.__ccx.onPinState(ccxSetPinnedIds)),` +
-            `[${renaming},${setRenaming}]=${useState}(null),${refs}=${useRef}(new Map)`,
+            `${between}[${renaming},${setRenaming}]=${useState}(null),${refs}=${useRef}(new Map)`,
         where: 'replace',
     },
     {
         // The title/branch filter itself: OR in a content match, and expose the unfiltered candidate
         // list globally in the same expression — the onChange hook below needs it, and this is the one
         // place its variable name (`te`, but renamed on every release) is already in scope and captured.
+        //
+        // 2.1.259 hoisted the lower-cased query out of the callback: what was
+        // `filter((s)=>{let q=query.toLowerCase();return …})` is now `q=query.toLowerCase(),result=…filter((s)=>…)`
+        // with a concise arrow body. The hoisted local is the anchor's first capture now, and the
+        // rewritten predicate has to stay an expression — a `{…}` body here would return undefined.
         file: 'webview/index.js',
-        find: /([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3/,
-        replace: (_found, result, query, source, item, lowerQ, titleFn) =>
-            `${result}=(globalThis.__ccxSearchCandidates=${source},` +
-            `${query}?${source}.filter((${item})=>{` +
-            `let ${lowerQ}=${query}.toLowerCase();return ${titleFn}(${item}).toLowerCase().includes(${lowerQ})||` +
+        find: /([\w$]+)=([\w$]+)\.toLowerCase\(\),([\w$]+)=\2\?([\w$]+)\.filter\(\(([\w$]+)\)=>([\w$]+)\(\5\)\.toLowerCase\(\)\.includes\(\1\)\|\|\(\5\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\1\)\?\?!1\)\):\4/,
+        replace: (_found, lowerQ, query, result, source, item, titleFn) =>
+            `${lowerQ}=${query}.toLowerCase(),${result}=(globalThis.__ccxSearchCandidates=${source},` +
+            `${query}?${source}.filter((${item})=>` +
+            `${titleFn}(${item}).toLowerCase().includes(${lowerQ})||` +
             `(${item}.gitBranch.value?.toLowerCase().includes(${lowerQ})??!1)||` +
-            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)}):${source})`,
+            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)):${source})`,
+        where: 'replace',
+    },
+    {
+        // The open-state accessor, handed over on globalThis rather than captured into the sort's own
+        // signature. pinSort needs it to rank a row — "running"/"waiting"/"idle"/"unread" — and through
+        // 2.1.258 the accessor sat directly after the memo, so one anchor covered both.
+        //
+        // 2.1.259 moved it ABOVE the memo, with the search filter (#7) in between, so a single anchor
+        // spanning the pair would overlap that point's own match. Two short anchors do not, and the
+        // handoff travels the same way #7 already hands its candidate list to #10.
+        //
+        // `openState:` is a property name rather than a minified local, which makes this the steadiest
+        // anchor in the component. The assignment rides the same `let` chain, so it re-runs on every
+        // render and a useCallback identity change never leaves a stale accessor behind.
+        file: 'webview/index.js',
+        find: /([\w$]+)=[\w$]+\(\(([\w$]+)\)=>\(\{openState:([\w$]+)\(\2\),remoteStatus:/,
+        replace: (found, _pair, _row, accessor) =>
+            `ccxOpenStateHandoff=(globalThis.__ccxOpenState=${accessor}),` + found,
         where: 'replace',
     },
     {
@@ -177,21 +206,18 @@ const PATCHES = [
         // within each half), and the grouping call takes THAT memo — so the sort has to reassign the
         // memo, not the filter. Sorting the filter's result would be discarded a line later.
         //
-        // Which is convenient: the memo and the accessor are adjacent in the chain, so this is a short
-        // anchor instead of a long one, and #7 goes back to being only about the filter.
-        //
         // The stock partition is a coarser version of the same idea — open first, everything else
         // after, no pins and no running/idle distinction — and pinSort re-blocks its output into all
         // four ranks, so the two compose rather than fight.
         //
-        // 2.1.257 also gave the accessor a fourth state, "unread", read from a second id set beside
-        // the open one. Both sets are captured, so renaming either costs nothing here.
+        // The memo itself has held from 2.1.257 through 2.1.259; only the accessor moved, which is why
+        // that half is the separate point above.
         file: 'webview/index.js',
-        find: /,([\w$]+)=[\w$]+\(\(\)=>\{if\(!([\w$]+)\)return ([\w$]+);return [\w$]+\(\3,\(([\w$]+)\)=>[\w$]+\(\4\)===!0\)\},\[\3,\2,[\w$]+\]\),([\w$]+)=[\w$]+\(\(([\w$]+)\)=>\{if\(!\2&&!([\w$]+)\)return;[\s\S]{0,400}?return [\w$]+\([\w$]+\(\2\),\6\.busy\.value,\6\.pendingInput\.value,[\w$]+\(\7\)\)\},\[\2,\7\]\)/,
-        replace: (found, sorted, _openIds, _filtered, _memoItem, openState) =>
+        find: /,([\w$]+)=[\w$]+\(\(\)=>\{if\(!([\w$]+)\)return ([\w$]+);return [\w$]+\(\3,\(([\w$]+)\)=>[\w$]+\(\4\)===!0\)\},\[\3,\2,[\w$]+\]\)/,
+        replace: (found, sorted) =>
             found +
             `,ccxPinSorted=(${sorted}=globalThis.__ccx&&globalThis.__ccx.pinSort` +
-            `?globalThis.__ccx.pinSort(${sorted},ccxPinnedIds,${openState}):${sorted})`,
+            `?globalThis.__ccx.pinSort(${sorted},ccxPinnedIds,globalThis.__ccxOpenState):${sorted})`,
         where: 'replace',
     },
     {

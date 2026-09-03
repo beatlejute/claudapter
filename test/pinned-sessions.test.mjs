@@ -396,13 +396,19 @@ console.log('OK — the page sorts, marks and toggles pins without waiting for t
 const patcher = readFileSync(new URL('../scripts/apply-patch.mjs', import.meta.url), 'utf8');
 assert.ok(/onPinState\(ccxSetPinnedIds\)/.test(patcher), 'the pin state hook must be handed to onPinState');
 assert.ok(/\[ccxPinnedIds,ccxSetPinnedIds\]=\$\{useState\}\(null\)/.test(patcher), 'the pin state pair must be declared');
+// 2.1.259 moved the accessor above the memo the sort reassigns, with the search filter in between,
+// so the two halves are separate injection points now and the accessor travels on globalThis.
 assert.ok(
-    /pinSort\(\$\{\w+\},ccxPinnedIds,\$\{openState\}\)/.test(patcher),
+    /globalThis\.__ccxOpenState=\$\{accessor\}/.test(patcher),
+    'the open-state accessor must be handed over from its own injection point',
+);
+assert.ok(
+    /pinSort\(\$\{\w+\},ccxPinnedIds,globalThis\.__ccxOpenState\)/.test(patcher),
     'the rendered list must go through pinSort, carrying the openState accessor',
 );
 assert.ok(
     /,ccxPinSorted=\(\$\{sorted\}=globalThis/.test(patcher),
-    'the sort must be appended after the accessor it captures, inside the same let chain',
+    'the sort must be appended to the memo it reassigns, inside the same let chain',
 );
 const page = readFileSync(new URL('../src/webview.js', import.meta.url), 'utf8');
 assert.ok(/onPinState: onPinState/.test(page) && /pinSort: pinSort/.test(page), 'window.__ccx must expose both hooks');

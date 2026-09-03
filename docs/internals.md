@@ -1,6 +1,6 @@
 # Inside Claude Code for VS Code
 
-A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.258**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#9 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. 2.1.245 broke two more, for a reason with no precedent in this file: it is the first release to put `$`-prefixed names into `extension.js`, which cost #2 its `\w+` identifier classes and #1 its literal anchor outright (see "CSP and loading your own script"). 2.1.246 cost nothing again, which is worth saying out loud because it is the release that deleted the whole model catalogue from `extension.js` — `provider_ids`, `knowledge_cutoff`, `effort_cost_index` and every `display_name` are gone from the extension and live only in the CLI binary now (see "The CLI does not remap `claude-fable-5`"). Nothing here reads them, so nothing moved. 2.1.247 cost nothing either — three releases in a row now — and its own diff is git-invocation hardening, a usage-limit grace banner behind an experiment gate (see "The usage-limit banner has a second tenant") and two spinner-tips settings. 2.1.250 cost nothing either — four in a row — and its diff is thinner still: one CLI setting (`desktopSessionCleanupPeriodDays`), one string in `extension.js` ("telemetry is off") and one new webview block that recognises the CLI's own model-switch notices — "Set model to ", "Kept model as ", "Current model: ", "Fast mode ON · model set to" and two cloud-switch failures — so it can strip their backticks before rendering. That block reads the transcript text claudapter also reads, but it only reformats stock messages; nothing it touches is written by this project. 2.1.251 cost nothing either — five in a row — and is thinner again: no new commands, VS Code settings, CLI settings keys or webview actions, one new string in `extension.js` (`"Private Key"`, the label on a `private-key` rule in the secret scanner) and none at all in the webview. Injection point #3 renamed two of its locals (`N.env=F;` → `N.env=D;`), which the structural signature absorbs without a change. 2.1.252 cost nothing either — six in a row — and is the thinnest release recorded here: both bundles are the same length as 2.1.251's to the byte and differ in seven single-character runs, every one of them a version string (six in `extension.js`, including the SDK's own `0.3.251` → `0.3.252`, and one in the webview's footer). Not an identifier moved, and the settings schema differs only in its `$comment` generation timestamp. The whole release is the CLI binary, 46,592 bytes larger, whose only new settings key is `scratchpadDirectory` — an environment-block field naming a temp directory for the agent to use instead of `/tmp` (see "The CLI does not remap `claude-fable-5`"). 2.1.257 ends that run and is the largest release recorded here since 2.1.245: archived sessions, unread markers, session groups reachable from the tab, an output-style picker and a slash-command browser, three new commands (`markSessionUnread`, `renameSessionTab`, `addSessionTabToGroup`), two new webview actions (`output-style`, `browse-slash-commands`) and four new CLI settings (`timeFormat`, `timeZone`, `permissions.blockReadsOutsideWorkingDirectories`, `modelPicker.options[].behavesAs`). It cost exactly one signature — the spanning one, #7 — and split it in two (see "Pinning is a sort, not a DOM move"), taking the injection count from eight to nine. It is also the first release to ship something claudapter already does: the session list now partitions open sessions to the front by itself. 2.1.258 is the opposite kind of release, and an exact repeat of 2.1.252: both bundles are the same length as 2.1.257's to the byte and differ in seven single-character runs, every one of them a version string — six in `extension.js`, including the SDK's own `0.3.257` → `0.3.258`, and one in the webview's footer — while the settings schema differs only in its `$comment` generation timestamp. Not an identifier moved, and all nine signatures matched as written. So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
+A teardown of version **2.1.233** (`anthropic.claude-code-2.1.233-win32-x64`); still current through **2.1.259**. 2.1.234's bundle was byte-for-byte the same shape. 2.1.235's was not — the session list's `useState` alias moved from `ne` to `ie` — and neither was 2.1.238's, which renamed the same component's `useRef` alias from `ge` to `_e` (both under "Content search reuses the session-list handoff" below). 2.1.239 broke a third — injection point #4, on the `$`-in-an-identifier trap that #6–#10 already carry a warning about (see "The session is not reachable from the context object"). Everything else held: all eight signatures match 2.1.239 with those captures generalised and nothing else touched, and 2.1.241 needed no change at all — every signature matched it as written, and its own diff against 2.1.239 is an onboarding-checklist entry and two strings. 2.1.245 broke two more, for a reason with no precedent in this file: it is the first release to put `$`-prefixed names into `extension.js`, which cost #2 its `\w+` identifier classes and #1 its literal anchor outright (see "CSP and loading your own script"). 2.1.246 cost nothing again, which is worth saying out loud because it is the release that deleted the whole model catalogue from `extension.js` — `provider_ids`, `knowledge_cutoff`, `effort_cost_index` and every `display_name` are gone from the extension and live only in the CLI binary now (see "The CLI does not remap `claude-fable-5`"). Nothing here reads them, so nothing moved. 2.1.247 cost nothing either — three releases in a row now — and its own diff is git-invocation hardening, a usage-limit grace banner behind an experiment gate (see "The usage-limit banner has a second tenant") and two spinner-tips settings. 2.1.250 cost nothing either — four in a row — and its diff is thinner still: one CLI setting (`desktopSessionCleanupPeriodDays`), one string in `extension.js` ("telemetry is off") and one new webview block that recognises the CLI's own model-switch notices — "Set model to ", "Kept model as ", "Current model: ", "Fast mode ON · model set to" and two cloud-switch failures — so it can strip their backticks before rendering. That block reads the transcript text claudapter also reads, but it only reformats stock messages; nothing it touches is written by this project. 2.1.251 cost nothing either — five in a row — and is thinner again: no new commands, VS Code settings, CLI settings keys or webview actions, one new string in `extension.js` (`"Private Key"`, the label on a `private-key` rule in the secret scanner) and none at all in the webview. Injection point #3 renamed two of its locals (`N.env=F;` → `N.env=D;`), which the structural signature absorbs without a change. 2.1.252 cost nothing either — six in a row — and is the thinnest release recorded here: both bundles are the same length as 2.1.251's to the byte and differ in seven single-character runs, every one of them a version string (six in `extension.js`, including the SDK's own `0.3.251` → `0.3.252`, and one in the webview's footer). Not an identifier moved, and the settings schema differs only in its `$comment` generation timestamp. The whole release is the CLI binary, 46,592 bytes larger, whose only new settings key is `scratchpadDirectory` — an environment-block field naming a temp directory for the agent to use instead of `/tmp` (see "The CLI does not remap `claude-fable-5`"). 2.1.257 ends that run and is the largest release recorded here since 2.1.245: archived sessions, unread markers, session groups reachable from the tab, an output-style picker and a slash-command browser, three new commands (`markSessionUnread`, `renameSessionTab`, `addSessionTabToGroup`), two new webview actions (`output-style`, `browse-slash-commands`) and four new CLI settings (`timeFormat`, `timeZone`, `permissions.blockReadsOutsideWorkingDirectories`, `modelPicker.options[].behavesAs`). It cost exactly one signature — the spanning one, #7 — and split it in two (see "Pinning is a sort, not a DOM move"), taking the injection count from eight to nine. It is also the first release to ship something claudapter already does: the session list now partitions open sessions to the front by itself. 2.1.258 is the opposite kind of release, and an exact repeat of 2.1.252: both bundles are the same length as 2.1.257's to the byte and differ in seven single-character runs, every one of them a version string — six in `extension.js`, including the SDK's own `0.3.257` → `0.3.258`, and one in the webview's footer — while the settings schema differs only in its `$comment` generation timestamp. Not an identifier moved, and all nine signatures matched as written. 2.1.259 ends that run after a single release, and it is the second-largest break recorded here: it rebuilt the session-list component around a status filter — an "Active · N" toggle over `needs_input`/`working`/`completed` and a multi-select menu beside it — and three signatures went with it. #6 had two declarations slid between the pair it brackets (the filter state and the predicate derived from it), #7 had its lower-cased query hoisted out of the filter callback, and #8 lost the accessor it captured, which moved to *above* the memo it sorts with #7 in between; that split it into two points and took the count from nine to ten. Nothing else moved: no new commands, no new VS Code settings, no new webview actions, one new CLI settings key (`managedMcpServers`), and every extension.js signature matched as written. So the rest was not re-verified line by line. Everything below comes from the bundle itself: line numbers refer to a formatted `extension.js` (`prettier 3.x --parser babel`, 143,324 lines), signatures to the minified original. Minified identifiers are renamed on nearly every release — they are quoted to make a spot findable, not as stable names.
 
 ## Package contents
 
@@ -64,6 +64,7 @@ Every identifier there is a minified local, and the minifier reshuffles them rel
 | 2.1.247–2.1.250 | `N.env=F;` | `;` |
 | 2.1.251–2.1.252 | `N.env=D;` | `;` |
 | 2.1.257–2.1.258 | `N.env=L;` | `;` |
+| 2.1.259 | `N.env=F;` | `;` |
 
 2.1.227 is the one that changed the **shape**, not just the names. Up to 2.1.226 the three assignments were the condition of an `if`, with the node path as the last operand of the comma expression:
 
@@ -319,7 +320,7 @@ page never reads the session off the context object.
 
 ### Content search reuses the session-list handoff — and needs `$` in its identifier class
 
-Points #6–#9 sit in the same session-list component as #4, and exist for the same reason: the row
+Points #6–#10 sit in the same session-list component as #4, and exist for the same reason: the row
 array and the title filter are local to that component, so anything wanting to widen the filter has
 to be injected right where they already live, not called in from outside.
 
@@ -327,13 +328,13 @@ to be injected right where they already live, not called in from outside.
 matches zero times here and nowhere else in the 4.7 MB bundle, which is a quiet way to fail: no
 error, just a signature that happens to sit at hit-count 0 instead of 1 and gets caught by
 `apply-patch.mjs`’s count check rather than by the regex itself. `[\w$]+` is what every capture group
-in points #6–#9 uses instead.
+in points #6–#10 uses instead.
 
-Point #6 is the state declaration, anchored on the exact sequence the query state, the rename-target
-state and the per-row ref map already form:
+Point #6 is the state declaration, anchored on the query state, the rename-target state and the per-row
+ref map — three declarations that used to be adjacent and, since 2.1.259, are not:
 
 ```js
-,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=([\w$]+)\(new Map\)
+,\[([\w$]+),([\w$]+)\]=([\w$]+)\(""\),([\s\S]{0,160}?)\[([\w$]+),([\w$]+)\]=\3\(null\),([\w$]+)=([\w$]+)\(new Map\)
 ```
 
 It inserts two more state pairs right after the query state — the ids the host reports back for
@@ -349,28 +350,42 @@ broken twice by exactly that, once per alias, and each time the fix was to stop 
 | 2.1.233–2.1.234 | `ne` | `ge` | — |
 | 2.1.235 | `ie` | `ge` | `useState` was hardcoded as `ne` |
 | 2.1.238 | `ie` | `_e` | `useRef` was hardcoded as `ge` |
+| 2.1.259 | `Y1` | `H1` | neither — two declarations moved *between* them |
 
 That is the general shape of these breaks: never every local at once, always some subset, and never
 predictably which one — `useState` moved while `useRef` held, then the reverse. The failure is quiet
 either way (hit count 0, not an exception), so `apply-patch.mjs`'s count check is what surfaces it.
 
+2.1.259 broke it a third way, and not by renaming anything: it inserted the status filter's own state
+and the predicate derived from it — `[M1,c]=Y1(by),_1=IJ0(M1),` — between the query state and the
+rename state. The three declarations the signature named in a row are no longer in a row. The fix is a
+lazy `([sS]{0,160}?)` gap, captured and re-emitted verbatim, so anything the app slides in there
+survives untouched. The outer pair still brackets the insertion, which is what keeps the match unique —
+a bare `useState("")` matches all over the bundle.
+
 Point #7 is the filter expression itself:
 
 ```js
-([\w$]+)=([\w$]+)\?([\w$]+)\.filter\(\(([\w$]+)\)=>\{let ([\w$]+)=\2\.toLowerCase\(\);return ([\w$]+)\(\4\)\.toLowerCase\(\)\.includes\(\5\)\|\|\(\4\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\5\)\?\?!1\)\}\):\3
+([\w$]+)=([\w$]+)\.toLowerCase\(\),([\w$]+)=\2\?([\w$]+)\.filter\(\(([\w$]+)\)=>([\w$]+)\(\5\)\.toLowerCase\(\)\.includes\(\1\)\|\|\(\5\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\1\)\?\?!1\)\):\4
 ```
 
 It ORs in a content match and — in the same expression, via the comma operator — assigns the
 unfiltered row array to `globalThis.__ccxSearchCandidates`. That assignment is the only reason point
-#9 does not need to capture the row array’s own name: it is a different statement, a good way down
+#10 does not need to capture the row array’s own name: it is a different statement, a good way down
 the same component, and re-anchoring across that whole span for one variable would trade two small,
 independent matches for one large, fragile one. Reading it off `globalThis` instead costs nothing —
 the component re-runs the assignment on every render, so the global is never more than one render
 stale, and the value is only ever read synchronously, inside the same render’s own event handlers.
 
-Point #8 is the sort, which is its own signature since 2.1.257; it is described in the next section.
+2.1.259 hoisted the lower-cased query out of the callback. What was
+`filter((s)=>{let q=query.toLowerCase();return …})` is now `q=query.toLowerCase(),result=…filter((s)=>…)`,
+with a concise arrow body — so the hoisted local is the signature's *first* capture rather than one
+declared inside the match, and the rewritten predicate has to stay an expression. A `{…}` body without
+a `return` would have filtered every row out while matching perfectly and passing the syntax check.
 
-Point #9 is the search input’s `onChange`, anchored on the literal `placeholder:"Search sessions…"`
+Points #8 and #9 are the sort, split in two by 2.1.259; both are described in the next section.
+
+Point #10 is the search input’s `onChange`, anchored on the literal `placeholder:"Search sessions…"`
 that follows it — the one piece of this trio that survives minification unchanged, because it is
 user-facing text:
 
@@ -391,8 +406,8 @@ session unchanged since the last keystroke costs nothing to check again.
 
 The row a pin acts on is not the page's to keep. The session list is re-derived from the app's own
 array on every render, and the array is ordered by recency — move the node and the next commit puts
-it back. So pinning is point #8: a sort spliced into the same `let` chain the list is built in, run
-before the component ever maps it to rows.
+it back. So pinning is point #9: a sort spliced into the same `let` chain the list is built in, run
+before the component ever maps it to rows — with point #8 handing it the accessor it ranks by.
 
 The sort is a stable partition into four blocks rather than a comparator: pinned ids, then the
 sessions running a turn or waiting for input, then the ones open in a tab but idle, then the rest —
@@ -428,6 +443,29 @@ Two adjacent declarations instead of a 700-byte span, appended to rather than re
 back to being only about the filter. The stock partition is a coarser version of the same idea — open
 first, everything else after, no pins and no running/idle distinction — so pinSort re-blocks its
 output into all four ranks and the two compose rather than fight.
+
+2.1.259 undid the adjacency. The accessor moved to *above* the memo — the component now derives its
+status-filter counts from it, so it has to exist first — with the search filter (#7) between the two.
+A single anchor spanning them would have contained #7's own match, and two patches whose regions
+overlap cannot both be applied to the same source. So the pair became two points that never touch:
+
+```js
+// #8, anchored on a property name rather than a local — the steadiest anchor in the component
+ccxOpenStateHandoff=(globalThis.__ccxOpenState=T6),r1=z0((b1)=>({openState:T6(b1),remoteStatus:…
+// #9, ~600 bytes later, appended to the memo it reassigns
+…,y2=S2(()=>{…},[Q2,Q4,y4]),ccxPinSorted=(y2=globalThis.__ccx.pinSort(y2,ccxPinnedIds,globalThis.__ccxOpenState))
+```
+
+The handoff rides the same `let` chain, so it re-runs on every render and a `useCallback` identity
+change never leaves a stale accessor behind — the same reasoning that lets #10 read its candidate
+list off `globalThis` instead of capturing a name.
+
+That release also gave the search row filters of its own: an **Active** toggle ("sessions that need
+input, are working, or are unread") and a **Filter by status** multi-select over `needs_input`,
+`working` and `completed`. They subtract rows before the memo the sort reassigns, so they compose
+with pinning the way search already does — with the same consequence: a pinned session the stock
+filter excludes is not shown at all. A pin is a position, not an exemption, and now there are two
+ways to filter it off the screen.
 
 A list already in block order is returned as the same array, so a render that needs no move allocates
 nothing, and an accessor that throws (or is missing, on an older patcher) drops the sort back to the

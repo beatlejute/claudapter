@@ -1,7 +1,7 @@
 # Claudapter
 
 > Switch API providers from inside the Claude Code UI — per tab, without touching global settings.
-> The project version mirrors the extension version its patch signatures were verified against: **2.1.258**.
+> The project version mirrors the extension version its patch signatures were verified against: **2.1.259**.
 
 **Claude Code for VS Code** can switch *models* within one provider, but not the provider itself. Changing it means editing `~/.claude/settings.json` by hand, and the change is global for every session.
 
@@ -44,7 +44,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 ## Requirements
 
 - Node.js ≥ 18 (no dependencies — nothing to `npm install`)
-- The `anthropic.claude-code` extension installed (verified against **2.1.258**; the signatures also match 2.1.220–2.1.257)
+- The `anthropic.claude-code` extension installed (verified against **2.1.259**; the signatures also match 2.1.220–2.1.256 — 2.1.257 and 2.1.258 need the `v2.1.258` branch)
 - Profiles in `~/.claude/profiles/*.json`:
 
 ```json
@@ -372,7 +372,7 @@ The bound profile is highlighted, so the list also says which of these the tab i
 
 ## How it works
 
-The logic lives **outside** the extension, in `~/.claude/claudapter`. Only nine short calls are injected into the bundle, so editing the UI needs no re-patching — a window reload is enough.
+The logic lives **outside** the extension, in `~/.claude/claudapter`. Only ten short calls are injected into the bundle, so editing the UI needs no re-patching — a window reload is enough.
 
 ```
 VS Code extension host                     webview (UI)
@@ -557,7 +557,7 @@ nothing. Only the **Local** tab is covered — remote/cloud sessions have no on-
 
 The list is ordered by the app, by recency, and re-derived from scratch on every render — so a pin
 cannot be a DOM move: the next commit would undo it. It is a **sort**, applied at the same place
-injection point #8 already sits, on the list the app is about to render. That list is also the one it
+injection point #9 already sits, on the list the app is about to render. That list is also the one it
 builds its keyboard-navigation index from, so arrow keys keep agreeing with what is on screen, and
 the order survives every re-render because it *is* part of the render.
 
@@ -571,9 +571,16 @@ orders by.
 
 2.1.257 also began doing a coarse version of this itself: the list the app renders is now a memo that
 puts open sessions in front of the rest, with no pins and no running/idle distinction. The sort runs
-on that memo's result and re-blocks it into all four ranks, so the two compose rather than fight —
-and since the memo is declared immediately before the accessor the sort needs, injection point #8 is
-two adjacent declarations rather than the 700-byte span it used to be.
+on that memo's result and re-blocks it into all four ranks, so the two compose rather than fight.
+
+2.1.259 moved the accessor the sort reads to *above* that memo, with the search filter in between, so
+the two halves are separate injection points now: #8 hands the accessor over on `globalThis` and #9
+reassigns the memo. A single anchor spanning both would have overlapped the filter's own match.
+
+That release also gave the search row two filters of its own — an **Active** toggle and a **Filter by
+status** menu over `needs_input` / `working` / `completed`. They subtract rows; the sort only reorders
+what survives, so they compose the same way search does. One consequence worth knowing: a pinned
+session the stock filter excludes is not shown at all, because the filter runs first.
 
 Search and pinning compose in the only way that makes sense: the sort runs on whatever survived the
 filter. With an empty query that is every session, so the pins sit at the very top; with a query it is
@@ -661,7 +668,8 @@ To turn it off entirely: `--no-upstream-check` on the patcher, or `CCX_NO_UPSTRE
 
 | Branch | Extension | What the minifier called the locals |
 |---|---|---|
-| `main` | 2.1.258 — newest | `N.env=L;`, `light:W,dark:W` |
+| `main` | 2.1.259 — newest | `N.env=F;`, `light:K,dark:K` |
+| `v2.1.259` | 2.1.259 | `N.env=F;`, `light:K,dark:K` |
 | `v2.1.258` | 2.1.258 | `N.env=L;`, `light:W,dark:W` |
 | `v2.1.257` | 2.1.257 | `N.env=L;`, `light:W,dark:W` |
 | `v2.1.252` | 2.1.252 | `N.env=D;`, `light:W,dark:W` |
@@ -688,9 +696,9 @@ To turn it off entirely: `--no-upstream-check` on the patcher, or `CCX_NO_UPSTRE
 | `v2.1.221` | 2.1.221 | `f.env=x,_)`, `light:a,dark:a` |
 | `v2.1.220` | 2.1.220 | `f.env=w,g)`, `light:a,dark:a` |
 
-One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. Both structural signatures are re-checked against every bundle still on disk at update time. VS Code garbage-collects retired extension folders, so the older ones eventually stop being verifiable locally — 2.1.220 through 2.1.226 were gone by the 2.1.228 update, and by 2.1.233 the sweep was 2.1.227 through 2.1.233 — at the 2.1.239 update only 2.1.235, 2.1.238 and 2.1.239 were still there, 2.1.241 joined that set without retiring any of it, the 2.1.245 update finally swept the rest, and by 2.1.247 the set is 2.1.245, 2.1.246 and 2.1.247 — that update retired the first two without deleting them, so all three were still verifiable, and 2.1.250 joined them the same way, leaving all four on disk — 2.1.251 makes five, 2.1.252 six, 2.1.257 seven and 2.1.258 eight, none of them retiring any of the others. Their branches stay pinned to the commit that was verified against them.
+One commit can serve several versions, and each branch differs from `main` only by its version stamp — the code is the same because injection points #2 and #3 match the *shape* of the assignment rather than the names in it. Both structural signatures are re-checked against every bundle still on disk at update time. VS Code garbage-collects retired extension folders, so the older ones eventually stop being verifiable locally — 2.1.220 through 2.1.226 were gone by the 2.1.228 update, and by 2.1.233 the sweep was 2.1.227 through 2.1.233 — at the 2.1.239 update only 2.1.235, 2.1.238 and 2.1.239 were still there, 2.1.241 joined that set without retiring any of it, the 2.1.245 update finally swept the rest, and by 2.1.247 the set is 2.1.245, 2.1.246 and 2.1.247 — that update retired the first two without deleting them, so all three were still verifiable, and 2.1.250 joined them the same way, leaving all four on disk — 2.1.251 makes five, 2.1.252 six, 2.1.257 seven and 2.1.258 eight, none of them retiring any of the others — the 2.1.259 update finally swept most of that set, leaving 2.1.245, 2.1.246, 2.1.247, 2.1.250, 2.1.251, 2.1.252, 2.1.257, 2.1.258 and 2.1.259 on disk with only the last one active. Their branches stay pinned to the commit that was verified against them.
 
-Renames have now cost almost every signature at least once, and 2.1.245 is where they reached the two that had held out longest. 2.1.238 renamed the session list's `useRef` alias (`ge` → `_e`), the one hook alias injection point #6 still hardcoded. 2.1.239 renamed a helper injection point #4 reads through to `$b` — and since that signature spelled its identifiers `\w+`, which does not match a `$`, it fell to zero hits on a name it was not even capturing. 2.1.245 carried that same `$` into `extension.js` for the first time and took #1 and #2 with it: #2 spelled its locals `\w+` while the panel had become `$`, and #1 was still a plain literal naming three locals outright — the nonce, the bundle's own script URI, and the webview parameter the injected call is handed. All of them are fixed the same way, by capturing what was being spelled out; #1 now anchors on `getHtmlForWebview`, the one unminified name within reach. 2.1.227 is the other kind of break — it dropped the bundled-node fallback, which deleted the `if(…)` wrapper around #3 and left the assignment ending in `;` instead of `,<nodePath>)`. The signature now captures that terminator and echoes it back verbatim, so one pattern still covers every release in the table. 2.1.241 is the counter-example worth recording: all eight signatures matched it untouched, the first release since 2.1.234 to cost nothing at all. 2.1.246 is the second, and the more surprising one — it is the release that moved the entire model catalogue out of `extension.js` and into the CLI binary, and still every signature matched as written, because none of them reads that catalogue. 2.1.247 makes three in a row: its whole diff is git-invocation hardening, a usage-limit grace banner behind an experiment gate, and two spinner-tips settings, and no signature stands on any of it. 2.1.250 and 2.1.251 take that to five, and 2.1.252 to six. 2.1.257 ends the run: it moved what #7 was assigning without moving the shape being matched — the app stopped rendering the filter’s result and started rendering a memo derived from it — so the sort was split off into its own point #8, which is why there are now nine. 2.1.251 did rename two locals inside #3 (`N.env=F;` → `N.env=D;`), which is precisely the rename the structural signature exists to absorb — it cost nothing, and the same is true of every release in this paragraph that is not named as a break. 2.1.252 did not even do that: its two bundles are the same length as 2.1.251's to the byte and differ in seven single-character runs, every one of them a version string, so not one identifier moved. 2.1.258 is that release again, to the shape of it — same lengths, same seven runs, same absence of any identifier move — and it starts a fresh run of releases that cost nothing.
+Renames have now cost almost every signature at least once, and 2.1.245 is where they reached the two that had held out longest. 2.1.238 renamed the session list's `useRef` alias (`ge` → `_e`), the one hook alias injection point #6 still hardcoded. 2.1.239 renamed a helper injection point #4 reads through to `$b` — and since that signature spelled its identifiers `\w+`, which does not match a `$`, it fell to zero hits on a name it was not even capturing. 2.1.245 carried that same `$` into `extension.js` for the first time and took #1 and #2 with it: #2 spelled its locals `\w+` while the panel had become `$`, and #1 was still a plain literal naming three locals outright — the nonce, the bundle's own script URI, and the webview parameter the injected call is handed. All of them are fixed the same way, by capturing what was being spelled out; #1 now anchors on `getHtmlForWebview`, the one unminified name within reach. 2.1.227 is the other kind of break — it dropped the bundled-node fallback, which deleted the `if(…)` wrapper around #3 and left the assignment ending in `;` instead of `,<nodePath>)`. The signature now captures that terminator and echoes it back verbatim, so one pattern still covers every release in the table. 2.1.241 is the counter-example worth recording: all eight signatures matched it untouched, the first release since 2.1.234 to cost nothing at all. 2.1.246 is the second, and the more surprising one — it is the release that moved the entire model catalogue out of `extension.js` and into the CLI binary, and still every signature matched as written, because none of them reads that catalogue. 2.1.247 makes three in a row: its whole diff is git-invocation hardening, a usage-limit grace banner behind an experiment gate, and two spinner-tips settings, and no signature stands on any of it. 2.1.250 and 2.1.251 take that to five, and 2.1.252 to six. 2.1.257 ends the run: it moved what #7 was assigning without moving the shape being matched — the app stopped rendering the filter’s result and started rendering a memo derived from it — so the sort was split off into its own point #8, which is why there are now nine. 2.1.251 did rename two locals inside #3 (`N.env=F;` → `N.env=D;`), which is precisely the rename the structural signature exists to absorb — it cost nothing, and the same is true of every release in this paragraph that is not named as a break. 2.1.252 did not even do that: its two bundles are the same length as 2.1.251's to the byte and differ in seven single-character runs, every one of them a version string, so not one identifier moved. 2.1.258 is that release again, to the shape of it — same lengths, same seven runs, same absence of any identifier move — and it starts a fresh run of releases that cost nothing. 2.1.259 ends that run after one: it rebuilt the session-list component around a status filter and cost three signatures at once — #6 gained two declarations between the pair it brackets, #7 had its lower-cased query hoisted out of the callback, and #8 lost the accessor it captured to a spot above the memo it sorts, which split it into #8 and #9 and took the injection count to ten.
 
 When adapting to a new release: verify the signatures against it, bump `package.json`, this README and [docs/internals.md](docs/internals.md) on `main`, then tag the result with a fresh `v<version>` branch.
 
