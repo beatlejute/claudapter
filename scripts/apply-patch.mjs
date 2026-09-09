@@ -98,8 +98,14 @@ const PATCHES = [
         // but a rename would have produced a ReferenceError at render time rather than a patch-time error.
         // It is now captured off the `trailingComponent:` expression that follows, three literal strings
         // deep into the same registration, which is as stable an anchor as this file has.
+        //
+        // 2.1.266 changed the label helper's first argument, not a name: what used to be the raw selection
+        // is now `N_(cfg,sel)?.value??sel` — the selection resolved through the config first. The argument
+        // is therefore matched as `[^;]*?` instead of a back-reference to the selection local. The three
+        // reads off the session (`modelSelection`, `claudeConfig`, `lastServedModel`) still pin the match,
+        // and a minified expression cannot contain a `;`, so the anchor after it cannot be overshot.
         file: 'webview/index.js',
-        find: /let ([\w$]+)=([\w$]+)\.modelSelection\.value,([\w$]+)=[\w$]+\(\2\.claudeConfig\.value\),([\w$]+)=[\w$]+\(\1,\2\.lastServedModel\.value,\3\);([\w$]+)\.commandRegistry\.registerAction\(\{id:"model",label:"Switch model…",description:"Change the AI model",trailingComponent:\4\?([\w$]+)\("span"/,
+        find: /let ([\w$]+)=([\w$]+)\.modelSelection\.value,([\w$]+)=[\w$]+\(\2\.claudeConfig\.value\),([\w$]+)=[\w$]+\([^;]*?,\2\.lastServedModel\.value,\3\);([\w$]+)\.commandRegistry\.registerAction\(\{id:"model",label:"Switch model…",description:"Change the AI model",trailingComponent:\4\?([\w$]+)\("span"/,
         replace: (found, _sel, session, _cfg, _label, ctx, jsx) =>
             found.replace(
                 `${ctx}.commandRegistry.registerAction({id:"model"`,
