@@ -1547,6 +1547,9 @@ function noteSessionId(webview, sessionId, weak = false) {
     if (!sessionId || webview.__ccxSessionId === sessionId) return;
     if (weak && webview.__ccxSessionId) return;
     webview.__ccxSessionId = sessionId;
+    // A cache tier belongs to one conversation. The next cached response establishes it again; carrying
+    // it across a tab changing sessions would schedule /compact against the wrong transcript.
+    delete webview.__ccxPromptCacheTier;
     // Remembered so a later ccx:apply does not bind against an id only a weak source ever confirmed
     webview.__ccxSessionWeak = weak;
     const forTab = S.profileByWebview.get(webview);
@@ -1559,6 +1562,18 @@ function noteSessionId(webview, sessionId, weak = false) {
     post(webview, { type: 'ccx:state', ...stateFor(sessionId, webview) });
 }
 
+// Where a turn's usage sits depends on the shape the CLI streams. The assistant message carries it in
+// full and is the one this channel actually sees; `message_delta` arrives only as a partial-message
+// event, and as a bare SDK type it belongs to the SDK's own SSE accumulator *inside* extension.js,
+// which never reaches a webview. Reading that bare type was the whole reason the first version of
+// auto-compaction never fired once — the branch matched nothing, silently.
+function sdkUsage(sdk) {
+    if (sdk.type === 'assistant') return (sdk.message && sdk.message.usage) || null;
+    if (sdk.type === 'stream_event') return (sdk.event && sdk.event.usage) || null;
+    if (sdk.type === 'message_delta') return sdk.usage || null;
+    return null;
+}
+
 function interceptOutgoing(webview) {
     if (webview.__ccxPatched) return;
     webview.__ccxPatched = true;
@@ -1569,6 +1584,30 @@ function interceptOutgoing(webview) {
             const sdk = envelope && envelope.type === 'io_message' ? envelope.message : null;
             if (sdk && sdk.type === 'system' && sdk.subtype === 'init' && sdk.session_id)
                 noteSessionId(webview, sdk.session_id);
+            // A turn's usage carries the cache_creation split the page's own TTL indicator reads, and
+            // only a turn that *wrote* cache names a tier: a turn that merely read one reports the
+            // split as zeros, which means "no write this time", not "no longer 1h". The stock helper
+            // says the same by returning undefined there and falling back to the ttl it already had.
+            // So the tier is remembered, and every cached turn — read or write — moves the anchor,
+            // since a read renews the lifetime just as a write establishes it.
+            const usage = sdk && sdkUsage(sdk);
+            if (usage) {
+                const cc = usage.cache_creation;
+                if (cc) {
+                    const before = webview.__ccxPromptCacheTier;
+                    if (Number(cc.ephemeral_1h_input_tokens) > 0) webview.__ccxPromptCacheTier = '1h';
+                    else if (Number(cc.ephemeral_5m_input_tokens) > 0) webview.__ccxPromptCacheTier = '5m';
+                    // Once per session in practice: the tier is established on the first cached turn and
+                    // then only repeats itself. A guard that matches nothing is indistinguishable from a
+                    // quiet feature, and that is exactly how the first version of this hid for a day.
+                    if (webview.__ccxPromptCacheTier !== before)
+                        dlog('prompt cache tier', { tier: webview.__ccxPromptCacheTier });
+                }
+                const cached =
+                    Number(usage.cache_read_input_tokens) > 0 || Number(usage.cache_creation_input_tokens) > 0;
+                if (cached && webview.__ccxPromptCacheTier === '1h')
+                    post(webview, { type: 'ccx:cache', ttl: '1h', anchorAt: Date.now() });
+            }
         } catch {}
         return original(msg);
     };

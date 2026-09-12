@@ -123,7 +123,7 @@ const PATCHES = [
         file: 'webview/index.js',
         find: '["model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]',
         replace:
-            '["ccx-provider","model","effort-level","toggle-thinking","switch-models-on-flag","ccx-health","account-usage"]/*__ccx*/',
+            '["ccx-provider","model","effort-level","toggle-thinking","ccx-autocompact","switch-models-on-flag","ccx-health","account-usage"]/*__ccx*/',
         where: 'replace',
     },
     // --- Search sessions by content, and pinned sessions (five hooks in one component) -----------

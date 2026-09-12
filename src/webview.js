@@ -35,6 +35,12 @@
     var sessionByChannel = {};
     var activeChannelId = null;
     var pendingRestart = null;
+    // The last 1h cache signal the host reported for the active session ({ ttl, anchorAt }), and the
+    // timer that fires the pre-expiry compaction. Both are page-local: a reload drops the signal, and
+    // the next message_delta restores it; the enabled flag survives in localStorage.
+    var cacheInfo = null;
+    var autocompactTimer = null;
+    var cacheSession = null;
     var searchSetter = null;
     var searchSeq = 0;
     var searchDebounceTimer = null;
@@ -126,6 +132,19 @@
                 },
                 'Model',
                 openHealth
+            );
+            // Sits under "Thinking" (toggle-thinking) by the Model section's sort order. keepMenuOpen
+            // keeps the menu up so the checkbox can be flipped without re-opening it each time.
+            registry.registerAction(
+                {
+                    id: 'ccx-autocompact',
+                    label: 'Auto-compact before cache expiry',
+                    description: 'Run /compact five minutes before the 1-hour prompt cache expires',
+                    trailingComponent: autocompactTick(),
+                    keepMenuOpen: true,
+                },
+                'Model',
+                toggleAutocompact
             );
         } catch (e) {
             console.warn('ccx: registerAction failed', e);
@@ -335,6 +354,12 @@
             }
             if (Array.isArray(d.hiddenMessages))
                 for (var hi = 0; hi < d.hiddenMessages.length; hi++) hiddenUuids.add(d.hiddenMessages[hi]);
+            // The cache signal belongs to one session; a new one starts with no signal and no timer.
+            if (state.sessionId !== cacheSession) {
+                cacheSession = state.sessionId;
+                cacheInfo = null;
+                cancelAutocompact();
+            }
             syncAction();
             syncChip();
             if (overlayKind === 'health') openHealth();
@@ -365,6 +390,14 @@
             if (d.sessionId !== messageTimesSession) return;
             messageTimes = d.times || {};
             decorateTranscript();
+        } else if (d.type === 'ccx:cache') {
+            // The host reports the 1h tier only; anything else is treated as "no signal" so a stale
+            // timer never fires on a session that has since dropped to the 5m tier.
+            cacheInfo = (d.ttl === '1h' && typeof d.anchorAt === 'number')
+                ? { ttl: d.ttl, anchorAt: d.anchorAt }
+                : null;
+            if (autocompactPref()) scheduleAutocompact();
+            else cancelAutocompact();
         } else if (d.type === 'ccx:agentRuns') {
             // Inert data for a read-only frame. It is never written into the composer, never sent
             // back to the host, and never handed to the app's own session object — the tab's context
@@ -1474,6 +1507,101 @@
             window.localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0');
         } catch (e) {
             /* a sidebar that cannot remember its fold is still a working sidebar */
+        }
+    }
+
+    // --- Auto-compact before the 1h cache expires ---------------------------------------------
+    //
+    // The host reports the last 1h cache signal (ccx:cache) and this schedules a /compact a little
+    // before it lapses — the compaction itself then rides the still-warm prefix instead of paying to
+    // re-cache the whole transcript on the next turn. Only the 1h tier is acted on; the 5m one is too
+    // short for a wait to mean anything, and the host never sends it.
+    var AUTOCOMPACT_KEY = 'ccx.autocompact.enabled';
+
+    function autocompactPref() {
+        try {
+            return window.localStorage.getItem(AUTOCOMPACT_KEY) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function rememberAutocompact(on) {
+        try {
+            window.localStorage.setItem(AUTOCOMPACT_KEY, on ? '1' : '0');
+        } catch (e) {
+            /* a flag that cannot be remembered still toggles for this page */
+        }
+    }
+
+    // The stock Thinking row draws its state with the app's own switch, and a glyph of ours beside it
+    // would read as an add-on wedged into the section. The registry keeps each section's actions in
+    // `sections`, and a React element carries its component on `.type` — so the very element Thinking
+    // registered supplies the switch, re-rendered with our own `isOn`.
+    //
+    // Nothing is drawn in its place when it cannot be found. A lookalike would hide the one thing worth
+    // seeing — that the bundle moved — and the row still toggles without it. The first pass can also
+    // genuinely miss it, since Thinking registers from an effect of its own; the next state push
+    // re-registers this row with the real switch.
+    function stockToggle(on) {
+        try {
+            var section = registry && registry.sections && registry.sections.get('Model');
+            if (section)
+                for (var i = 0; i < section.length; i++) {
+                    var row = section[i];
+                    if (!row || row.id !== 'toggle-thinking') continue;
+                    var el = row.trailingComponent;
+                    if (el && el.type) return jsx(el.type, { isOn: on });
+                }
+        } catch (e) {
+            /* a switch we could not borrow is a bare row, not a broken one */
+        }
+        return undefined;
+    }
+
+    function autocompactTick() {
+        if (!jsx) return undefined;
+        return stockToggle(autocompactPref());
+    }
+
+    function toggleAutocompact() {
+        var next = !autocompactPref();
+        rememberAutocompact(next);
+        syncAction(); // re-register so the trailing checkbox follows the new state
+        if (next) scheduleAutocompact();
+        else cancelAutocompact();
+    }
+
+    function cancelAutocompact() {
+        if (autocompactTimer) {
+            clearTimeout(autocompactTimer);
+            autocompactTimer = null;
+        }
+    }
+
+    function scheduleAutocompact() {
+        cancelAutocompact();
+        if (!autocompactPref() || !cacheInfo || cacheInfo.ttl !== '1h') return;
+        var at = cacheInfo.anchorAt + 55 * 60 * 1000;
+        autocompactTimer = setTimeout(runAutocompact, Math.max(0, at - Date.now()));
+    }
+
+    function runAutocompact() {
+        autocompactTimer = null;
+        if (!autocompactPref() || !cacheInfo || cacheInfo.ttl !== '1h') return;
+        // A turn still running means the compaction would queue behind it; retry shortly instead.
+        if (!canCompact()) {
+            autocompactTimer = setTimeout(runAutocompact, 30000);
+            return;
+        }
+        toast('Compacting before the 1-hour cache expires…');
+        try {
+            var s = activeSession();
+            if (!s) return;
+            var r = s.send('/compact');
+            if (r && typeof r.catch === 'function') r.catch(function () {});
+        } catch (err) {
+            /* a compaction that cannot start is not a broken page */
         }
     }
 

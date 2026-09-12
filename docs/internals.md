@@ -603,6 +603,42 @@ if (t === "Model") {
 
 So the position of a custom entry is set by adding its id to that array, not by registration order.
 
+### Borrowing the app's own switch instead of drawing one
+
+A row that carries state — *Auto-compact before cache expiry* sits directly under *Thinking* — has to wear the same control *Thinking* does, or it reads as an add-on wedged into the section. The component is `TP({isOn, label})`, purely presentational, and it is a module-scope local: not reachable from the registry, not exported, and renamed on every build.
+
+It does not have to be reached. The registry keeps two maps, and they hold different things:
+
+```js
+sections = new Map;        // section -> the action objects, trailingComponent and all
+commandActions = new Map;  // id -> the handler only
+```
+
+`registerAction` puts the whole action into `sections`, so the element *Thinking* registered is sitting there in plain view — and a React element carries its component on `.type`. `registry.sections.get("Model")`, find `id === "toggle-thinking"`, read `.type` off its `trailingComponent`, and the same switch re-renders with our own `isOn`. No tenth injection point, and no glyph that drifts from the stock control the next time it is restyled.
+
+Two orderings make this safe. The action objects in `sections` are replaced by id rather than appended, so re-registering on every state push updates the row in place. And the first pass may genuinely run before *Thinking* has registered — those are separate effects — so a miss leaves the slot empty and the next state push fills it with the real switch.
+
+Nothing is drawn in its place when the lookup fails. A pill of our own shaped like the switch was written first and then taken out: the only case it survives into is a build that moved either the map or the row, and there the visible drift *is* the finding — a lookalike would hide it while the row kept working, which is exactly the failure this project spends its count checks avoiding.
+
+### `message_delta` never reaches a webview
+
+Auto-compaction needs one number the CLI reports and nothing else records: which tier the prompt cache was written at. It rides `usage.cache_creation`, and the first version went looking for it on `message_delta` — the Anthropic event that carries the closing usage of a streamed response. The branch matched nothing, every turn, and the feature simply never fired. Nothing failed loudly, because a type guard that is never true looks exactly like a quiet feature.
+
+`message_delta` does occur in `extension.js`, six times — all of them inside the **bundled SDK's own SSE accumulator**, the `switch` that folds `message_start` / `content_block_delta` / `message_stop` back into one response object. That is upstream of the channel. What crosses `io_message` is an SDK message, and the usage arrives whole, on the assistant turn:
+
+```jsonc
+{ "type": "assistant",
+  "message": { "type": "message", "role": "assistant",
+               "usage": { "cache_creation_input_tokens": 197994,
+                          "cache_read_input_tokens": 0,
+                          "cache_creation": { "ephemeral_1h_input_tokens": 197994,
+                                              "ephemeral_5m_input_tokens": 0 } } } }
+```
+
+The session `.jsonl` is the cheap way to check this — it is written in the same shape, so one line of a real transcript settles what a guard should match without a reload and a live turn.
+
+The second trap is in the numbers. Only a turn that **wrote** cache names a tier; a turn that merely read one reports the split as `{1h: 0, 5m: 0}`, which means *no write this time*, not *no longer 1h*. Reading zeros as a reset drops the tier on the second turn of every conversation — and the page's own indicator says the same thing in its own code, returning `undefined` for all-zeros and falling back to the ttl it already held. So the tier is remembered per webview and cleared only when the session changes, while the anchor moves on every cached turn: a read renews the cache's lifetime exactly as a write establishes it, so the deadline has to follow both.
+
 ### The session history carries no session id
 
 The history row (`webview/index.js`, minified `ELt`, anchor `` className:`${bn.sessionItem}` ``) is a bare
@@ -772,7 +808,7 @@ An entry in the command menu costs none of that. `registerAction(action, section
 if (J === "Model") { let Z = ["model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]; X.sort(…) }
 ```
 
-`registerAction` ranks the section by that list and sends anything it does not name to the end (`indexOf` → `-1` → `Z.length`), so an entry added from the page lands below *Account & Usage* in whatever order it happened to register. Naming both ids in the array is what puts *Switch provider…* at the top of the section and *Provider status…* immediately before the stock account panel, which is the entry it reads as a companion to.
+`registerAction` ranks the section by that list and sends anything it does not name to the end (`indexOf` → `-1` → `Z.length`), so an entry added from the page lands below *Account & Usage* in whatever order it happened to register. Naming the ids in the array is what places all three: *Switch provider…* at the top of the section, *Auto-compact before cache expiry* directly under *Thinking* (the row whose switch it borrows), and *Provider status…* immediately before the stock account panel, which is the entry it reads as a companion to.
 
 The sessions sidebar is the one place where a section *is* the right shape. It is a second webview drawn by the same bundle (view id `claudeVSCodeSessionsList`), it already stacks foldable sections — `ma0`/`ca0` render "Account & usage", then "Session manager" — and each one is a header node followed by its body as a **sibling**, not a wrapper. So the page finds the stack by the only thing in it that is not hashed (those two labels), builds its own header from the live one's class names, and clones the chevron SVG rather than redrawing it: a clone carries no React handler, which is what makes it safe to hang our own `onclick` on the button around it. The fold state is ours to keep — theirs lives in `sessionSectionCollapseState`, which is written through their own message protocol — so it goes to `localStorage` under `ccx.providers.collapsed`, the one piece of state in the page that has to survive a reload without troubling the host.
 
