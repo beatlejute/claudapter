@@ -1376,8 +1376,10 @@
     function providerNote(health, now) {
         if (!health || health.ok) return '';
         var parts = [];
+        // Both can be present at once: a 5xx is recorded as silence — it says nothing about this
+        // profile — but the status it arrived with is still the part worth reading.
         if (health.unreachable) parts.push('no answer');
-        else if (health.status) parts.push('HTTP ' + health.status);
+        if (health.status) parts.push('HTTP ' + health.status);
         if (health.message) parts.push(health.message);
         if (health.resetsAt) {
             var left = health.resetsAt - now;

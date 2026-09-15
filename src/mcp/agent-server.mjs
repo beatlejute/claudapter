@@ -251,9 +251,23 @@ async function ensureProxy(profile) {
 // timeout whose message says nothing about why — an exhausted GLM balance and a hung network look
 // identical. One cheap call up front turns that into the provider's own words, immediately.
 //
-// Deliberately non-blocking on anything but a clear refusal: a probe that times out or cannot
-// connect proves nothing the real run will not find out for itself, and must not stop it.
+// Deliberately non-blocking on anything but a clear refusal: a probe that times out, cannot connect
+// or meets a 5xx proves nothing the real run will not find out for itself, and must not stop it.
 const PREFLIGHT_TIMEOUT_MS = 8000;
+
+// One sample is not a verdict. An overloaded backend answers 529 to one request and 200 to the next
+// one second later — seen on codex, where three identical curls returned 200, 529, 200 while a live
+// session kept streaming through the same minute. Believing the unlucky sample cancels a run the CLI
+// itself would have retried its way through, so a transient answer is taken up to three times.
+const PREFLIGHT_ATTEMPTS = 3;
+const PREFLIGHT_RETRY_PAUSE_MS = 1000;
+// ...and never past this in total. A hung endpoint would otherwise sit three full timeouts in front
+// of a run whose verdict — unreachable, and non-blocking either way — the first sample already gave.
+const PREFLIGHT_BUDGET_MS = 12_000;
+// Statuses the upstream did not choose for this profile: a gateway in trouble, a backend overloaded.
+// A refusal worth cancelling a run for names the account — 401, 403, 429 — and never repeats itself
+// away.
+const TRANSIENT_STATUS = new Set([502, 503, 504, 529]);
 
 // Which route the probe takes. Plain fetch() ignores HTTPS_PROXY: left to its own devices the probe
 // rides the direct network path while the run it vouches for rides the configured proxy — and
@@ -404,7 +418,7 @@ async function preflight(env, requestedModel, profile) {
         return message;
     }
 
-    const verdict = await probeOnce(
+    const verdict = await probeUntilSettled(
         env,
         `${base}/v1/messages`,
         {
@@ -425,6 +439,14 @@ async function preflight(env, requestedModel, profile) {
         return null;
     }
     const text = verdict.body || '';
+    // A 5xx that outlived the retries is still the upstream's own trouble and not this profile's
+    // verdict: the account is fine, the key is fine, and the run's own requests get the CLI's backoff
+    // that the probe does not have. Recorded as silence — the listing says "no answer", not "FAILED"
+    // — and the run goes ahead.
+    if (verdict.status >= 500) {
+        recordHealth(profile, { ok: false, unreachable: true, status: verdict.status, message: providerMessage(text), model });
+        return null;
+    }
     const retryAfter = { get: (name) => (String(name).toLowerCase() === 'retry-after' ? verdict.retry_after || null : null) };
     recordHealth(profile, {
         ok: false,
@@ -446,6 +468,22 @@ function loopbackHost(url) {
     } catch {
         return false;
     }
+}
+
+// The probe, taken until it says something about this profile rather than about the minute it fell
+// in. A 5xx and an unanswered socket are both the weather and get another look; every other answer
+// is the provider's own and stands on the first sample. The pause is there so the second sample is
+// not the same instant as the first: an overload that lifts, lifts in about a second.
+async function probeUntilSettled(env, url, headers, body) {
+    const started = Date.now();
+    let verdict = await probeOnce(env, url, headers, body);
+    for (let attempt = 2; attempt <= PREFLIGHT_ATTEMPTS; attempt++) {
+        if (!verdict.unreachable && !TRANSIENT_STATUS.has(verdict.status)) break;
+        if (Date.now() - started >= PREFLIGHT_BUDGET_MS) break;
+        await new Promise((resolve) => setTimeout(resolve, PREFLIGHT_RETRY_PAUSE_MS));
+        verdict = await probeOnce(env, url, headers, body);
+    }
+    return verdict;
 }
 
 async function probeOnce(env, url, headers, body) {
@@ -577,8 +615,13 @@ function describeHealth(profile, now = Date.now(), health = readJson(HEALTH_FILE
     const age = span(now - Date.parse(h.at));
     if (h.ok) return `ok ${age} ago`;
     // A probe that could not connect is not a provider that refused: reporting it as a refusal
-    // would send the reader to fix a quota when the adapter is simply down.
-    if (h.unreachable) return `no answer ${age} ago — the endpoint did not respond to a test call`;
+    // would send the reader to fix a quota when the adapter is simply down. A 5xx is filed here
+    // too — the upstream answered, but about itself — and what it said goes on the line, where
+    // silence has nothing to add.
+    if (h.unreachable) {
+        const said = [h.status ? `HTTP ${h.status}` : '', h.message ? String(h.message).slice(0, 140) : ''].filter(Boolean).join(' · ');
+        return h.status ? `no answer ${age} ago — ${said}` : `no answer ${age} ago — the endpoint did not respond to a test call`;
+    }
     const parts = [`FAILED ${age} ago`];
     if (h.status) parts.push(`HTTP ${h.status}`);
     if (h.message) parts.push(String(h.message).slice(0, 140));

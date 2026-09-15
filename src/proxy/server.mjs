@@ -453,6 +453,14 @@ async function readSse(req, upstreamResponse, onEvent) {
 // An overloaded upstream is retryable, so it keeps the status the CLI backs off on
 const failureStatus = (message) => (/overload|try again|temporarily/i.test(message) ? 529 : 502);
 
+// What goes in the log beside a refusal. The English sentence is the same whether the backend is
+// overloaded, the plan is being throttled or something broke upstream — the code and type are the
+// only part that tells them apart, and a reader chasing a 529 needs exactly that.
+const describeFailure = (failure) =>
+    [failure.message, failure.code && `code=${failure.code}`, failure.type && `type=${failure.type}`]
+        .filter(Boolean)
+        .join(' · ');
+
 async function streamResponses(req, res, upstreamResponse, request, reasoning, inputTokens) {
     // Headers are sent lazily: while they are pending, a failure can still be reported with a real HTTP status;
     // otherwise the CLI sees "200 with an empty body" and cannot tell it was an error
@@ -477,11 +485,11 @@ async function streamResponses(req, res, upstreamResponse, request, reasoning, i
 
         // A failure must not be closed like a normal response: the CLI would treat it as success and never retry
         if (translator.failure) {
-            log('upstream reported failure', translator.failure);
-            const status = failureStatus(translator.failure);
+            log('upstream reported failure', describeFailure(translator.failure));
+            const status = failureStatus(translator.failure.message);
             const type = status === 529 ? 'overloaded_error' : 'api_error';
-            if (!res.headersSent) return sendError(res, status, translator.failure, type);
-            writeEvent(res, 'error', { type: 'error', error: { type, message: translator.failure } });
+            if (!res.headersSent) return sendError(res, status, translator.failure.message, type);
+            writeEvent(res, 'error', { type: 'error', error: { type, message: translator.failure.message } });
         } else if (!translator.completed) {
             // A stream that just stops — dropped by the corporate proxy, cut short upstream — carries no
             // failure to report. Finishing it normally would hand the CLI a well-formed end_turn: no error,
@@ -514,9 +522,9 @@ async function collectResponses(req, res, upstreamResponse, request, reasoning) 
     }
 
     if (collector.failure) {
-        log('upstream reported failure', collector.failure);
-        const status = failureStatus(collector.failure);
-        return sendError(res, status, collector.failure, status === 529 ? 'overloaded_error' : 'api_error');
+        log('upstream reported failure', describeFailure(collector.failure));
+        const status = failureStatus(collector.failure.message);
+        return sendError(res, status, collector.failure.message, status === 529 ? 'overloaded_error' : 'api_error');
     }
     if (!collector.completed) return sendError(res, 502, 'upstream stream ended without a terminal event');
 

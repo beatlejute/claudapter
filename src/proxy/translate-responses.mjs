@@ -254,6 +254,18 @@ function responsesToAnthropic(payload, fallbackModel) {
     };
 }
 
+// What the upstream said when it refused, kept whole. The message alone cannot tell a passing
+// overload from a spent plan quota or a bug on the backend — they arrive as the same English
+// sentence — so the machine-readable half of the error travels with it and reaches the log.
+function failureFrom(error, fallback) {
+    const source = error && typeof error === 'object' ? error : {};
+    return {
+        message: String(source.message || fallback),
+        code: typeof source.code === 'string' || typeof source.code === 'number' ? String(source.code) : null,
+        type: typeof source.type === 'string' ? source.type : null,
+    };
+}
+
 // Collects a Responses SSE stream back into one response object.
 // The codex backend only ever streams, so a caller that asked for a non-streaming
 // answer needs the stream reassembled before it can be translated.
@@ -277,15 +289,16 @@ function createResponsesCollector() {
                     break;
 
                 case 'response.failed':
-                    failure = payload.response?.error?.message || 'upstream failure';
+                    failure = failureFrom(payload.response?.error, 'upstream failure');
                     break;
 
                 case 'error':
-                    failure = payload.error?.message || payload.message || 'upstream error';
+                    failure = failureFrom(payload.error || payload, 'upstream error');
                     break;
             }
         },
 
+        // `{ message, code, type }` once the upstream refused, null while it has not
         get failure() {
             return failure;
         },
@@ -441,11 +454,11 @@ function createResponsesStreamTranslator(model, options = {}) {
                 }
 
                 case 'response.failed':
-                    failure = payload.response?.error?.message || 'upstream failure';
+                    failure = failureFrom(payload.response?.error, 'upstream failure');
                     break;
 
                 case 'error':
-                    failure = payload.error?.message || payload.message || 'upstream error';
+                    failure = failureFrom(payload.error || payload, 'upstream error');
                     break;
             }
             return drain();
@@ -468,6 +481,7 @@ function createResponsesStreamTranslator(model, options = {}) {
             return drain();
         },
 
+        // `{ message, code, type }` once the upstream refused, null while it has not
         get failure() {
             return failure;
         },

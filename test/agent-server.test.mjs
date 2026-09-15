@@ -278,6 +278,46 @@ async function main() {
     reply = { status: 400, body: 'not json at all' };
     assert.match(await preflight(providerEnv, 'haiku'), /HTTP 400 — not json at all/, 'an unparseable body is passed through verbatim');
 
+    // --- a passing 5xx is the weather, not a verdict. An overloaded backend answers 529 to one
+    //     request and 200 to the next: three identical curls against codex returned 200, 529, 200
+    //     while a live session streamed through the same minute. Believing the unlucky sample would
+    //     cancel a run the CLI would have retried its way through.
+    let served = 0;
+    const flaky = (status, body) => {
+        served = 0;
+        reply = { get status() {
+            served += 1;
+            return served === 1 ? status : 200;
+        }, get body() {
+            return served === 1 ? body : '{"content":[]}';
+        } };
+    };
+    flaky(529, '{"type":"error","error":{"type":"overloaded_error","message":"Our servers are currently overloaded."}}');
+    assert.strictEqual(await preflight(providerEnv, 'haiku', 'flaky'), null, 'one 529 does not refuse the run — the probe is taken again');
+    assert.strictEqual(served, 2, 'and exactly one extra sample was enough');
+    assert.match(describeHealth('flaky'), /^ok /, 'the second answer is the one recorded');
+
+    // A 5xx that outlives the retries still is not this profile's verdict: the key and the quota are
+    // fine, the backend is not. The run goes ahead and the listing says so in the softer word.
+    reply = { status: 503, body: '{"error":{"message":"Service Unavailable"}}' };
+    assert.strictEqual(await preflight(providerEnv, 'haiku', 'down'), null, 'a persistent 5xx does not block the run either');
+    const downNote = describeHealth('down');
+    assert.match(downNote, /^no answer /, 'a busy backend is silence, not a refusal — nothing to fix on the account');
+    assert.ok(!downNote.includes('FAILED'), 'and never reads as FAILED');
+    assert.match(downNote, /HTTP 503 · Service Unavailable/, 'what the backend said is still on the line');
+
+    // A 4xx is the provider's own verdict and repeating it would only waste the run's first seconds
+    served = 0;
+    reply = { get status() {
+        served += 1;
+        return 401;
+    }, body: '{"error":{"message":"invalid api key"}}' };
+    assert.match(await preflight(providerEnv, 'haiku'), /HTTP 401 — invalid api key/, 'a rejected key refuses the run');
+    assert.strictEqual(served, 1, 'and is asked exactly once');
+
+    // back to the plain refusal the sections below are written against
+    reply = { status: 400, body: 'not json at all' };
+
     // --- the probe takes the route the run will take. A declared proxy applies to the probe too —
     //     plain fetch() would ignore it, and behind a filtering gateway the direct route draws a
     //     refusal no provider ever sent. Loopback endpoints are the exception: nothing local has

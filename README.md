@@ -230,7 +230,7 @@ Notes worth knowing before relying on it:
 - **`model` defaults to the `sonnet` alias**, which each profile maps through its own `ANTHROPIC_DEFAULT_SONNET_MODEL`. A literal id is sent to the provider untouched. The report names both the alias asked for and the model that answered.
 - **Credentials never cross.** The calling session's `ANTHROPIC_*` variables are stripped before the profile's own are applied — including for the subscription profile, whose empty `env` would otherwise inherit whatever the caller was using.
 - **Delegation depth is capped at 2**, so an agent can delegate once and no further.
-- **A refusing provider is reported, not waited out.** An exhausted balance or a spent quota comes back as `429`, which the CLI treats as retryable and backs off on until the timeout kills the task — fifteen minutes to learn nothing. One `max_tokens: 1` call goes out first, and a refusal is returned in the provider's own words in about a second (*"Insufficient balance. Please recharge."*, *"Your token-plan 1-week quota has been exhausted"*). A probe that times out or cannot connect never blocks the run — it proves nothing the real attempt will not find out itself. Set `CLAUDAPTER_SKIP_PREFLIGHT=1` to turn it off.
+- **A refusing provider is reported, not waited out.** An exhausted balance or a spent quota comes back as `429`, which the CLI treats as retryable and backs off on until the timeout kills the task — fifteen minutes to learn nothing. One `max_tokens: 1` call goes out first, and a refusal is returned in the provider's own words in about a second (*"Insufficient balance. Please recharge."*, *"Your token-plan 1-week quota has been exhausted"*). A probe that times out, cannot connect, or meets a `5xx` never blocks the run — it proves nothing the real attempt will not find out itself. A passing `5xx` is not even believed on the first look: `502`, `503`, `504` and `529`, like an unanswered socket, are sampled up to three times a second apart, because an overloaded backend answers `529` to one request and `200` to the next while a live session streams through the same minute. Only a status the provider chose for this account — `401`, `403`, `429` — cancels the run. Set `CLAUDAPTER_SKIP_PREFLIGHT=1` to turn it off.
 - **What the provider said last is remembered**, in `agent-health.json`, and shown under its profile in `list_profiles` — including when the refusal lifts, dug out of a `resets_at`, a `retry-after`, or the sentence itself:
 
   ```
@@ -238,7 +238,12 @@ Notes worth knowing before relying on it:
       FAILED 1s ago · HTTP 429 · The usage limit has been reached · resets 2026-08-27 10:22Z (in 5d 5h)
   deepseek — api.deepseek.com — opus=deepseek-v4-pro, sonnet=deepseek-v4-flash
       ok 2s ago
+  glm — open.bigmodel.cn — opus=glm-5.2, sonnet=glm-5.2-air
+      no answer 4s ago — HTTP 529 · Our servers are currently overloaded.
   ```
+
+  A backend in trouble reads as `no answer`, not as `FAILED`: there is nothing to fix on the account,
+  and the run it was asked about went ahead.
 
 - The run is recorded in `bindings.json`, so it carries its provider's icon in the session history like any tab, and in `agent-sessions.json`, which is what makes it resumable.
 

@@ -64,7 +64,14 @@ const FAIL_EVENTS = [
     ['response.created', { type: 'response.created', response: { id: 'resp_f', model: 'gpt-5.5' } }],
     [
         'response.failed',
-        { type: 'response.failed', response: { error: { message: 'Our servers are currently overloaded.' } } },
+        {
+            type: 'response.failed',
+            // The sentence is the same for an overload, a throttled plan and a backend bug; only the
+            // code and the type tell them apart, so the backend sends all three here.
+            response: {
+                error: { message: 'Our servers are currently overloaded.', code: 'server_overloaded', type: 'server_error' },
+            },
+        },
     ],
 ];
 
@@ -336,6 +343,13 @@ async function main() {
 
     // --- 6a. failure BEFORE the first event: a real HTTP status instead of "200 with an empty body"
     mode = 'fail-immediate';
+    // The log line goes to stdout as well as to proxy.log; borrow it for the length of one request.
+    const written = [];
+    const stdoutWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (chunk, ...rest) => {
+        written.push(String(chunk));
+        return stdoutWrite(chunk, ...rest);
+    };
     const early = await fetch(`${base}/v1/messages`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-api-key': 'sk-test' },
@@ -345,6 +359,28 @@ async function main() {
     const earlyBody = await early.json();
     assert.strictEqual(earlyBody.error.type, 'overloaded_error', 'error type is overloaded_error');
     assert.match(earlyBody.error.message, /overloaded/i, 'backend message preserved');
+    process.stdout.write = stdoutWrite;
+
+    // Reading "overloaded" a week later says nothing about whether the backend was busy, the plan
+    // was throttled or something upstream broke. The code and the type say which, so they stand in
+    // the log beside the sentence.
+    const failureLine = written.find((l) => l.includes('upstream reported failure'));
+    assert.ok(failureLine, 'the refusal is logged');
+    assert.match(failureLine, /code=server_overloaded/, 'with the upstream error code');
+    assert.match(failureLine, /type=server_error/, 'and its type');
+
+    // The same three fields reach the collector, which is what the non-streaming path reports from
+    const collected = createResponsesCollector();
+    for (const [name, payload] of FAIL_EVENTS) collected.event(name, payload);
+    assert.deepStrictEqual(
+        collected.failure,
+        { message: 'Our servers are currently overloaded.', code: 'server_overloaded', type: 'server_error' },
+        'the collector keeps the machine-readable half of the error, not just the sentence',
+    );
+    // A backend that sends nothing but a sentence still translates — the two fields go null, not away
+    const bare = createResponsesCollector();
+    bare.event('error', { message: 'boom' });
+    assert.deepStrictEqual(bare.failure, { message: 'boom', code: null, type: null });
 
     // --- 6b. failure AFTER the stream started: an error event inside the SSE
     mode = 'fail';
