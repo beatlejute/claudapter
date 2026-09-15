@@ -400,7 +400,7 @@ VS Code extension host                     webview (UI)
 | 6 | `webview/index.js` | *structural* — the session list's `[query,setQuery]=ne(""),[renaming,…]=ne(null),refs=ge(new Map)` | two more state pairs — content-search results and pinned ids — and hands both setters over |
 | 7 | `webview/index.js` | *structural* — the title/branch filter expression that follows it | ORs in a content match and exposes the unfiltered row list globally |
 | 8 | `webview/index.js` | *structural* — the open-first memo and the `openState` accessor beside it | orders the list the app renders: pinned, running, open, closed |
-| 9 | `webview/index.js` | `onChange:(e)=>J(e.target.value),placeholder:"Search sessions…"` | forwards every keystroke to the host-side transcript search |
+| 9 | `webview/index.js` | `onChange:(e)=>{…},placeholder:"Search sessions…"` | forwards every keystroke to the host-side transcript search |
 
 ### Sending an attachment on its own
 

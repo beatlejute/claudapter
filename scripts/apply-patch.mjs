@@ -227,14 +227,20 @@ const PATCHES = [
         where: 'replace',
     },
     {
-        // The search input: forwards every keystroke to the host lookup, on top of the stock J(...).
-        // Reads the candidate list back off globalThis rather than a captured variable name, since the
-        // list is computed a different statement away from the input and re-anchoring across that span
-        // would be one large, fragile match instead of two small ones.
+        // The search input: forwards every keystroke to the host lookup, on top of whatever the stock
+        // handler already does. Reads the candidate list back off globalThis rather than a captured
+        // variable name, since the list is computed a different statement away from the input and
+        // re-anchoring across that span would be one large, fragile match instead of two small ones.
+        //
+        // The body is captured whole and re-emitted verbatim rather than rebuilt from a captured setter
+        // name. Through 2.1.269 it was a single bare call — `(X1)=>i1(X1.target.value)` — and 2.1.272
+        // made it a block with a second setter in it, `{X0(Y1.target.value),I2(!0)}`, which a signature
+        // spelling out one call could not match. Taking the block as an opaque statement list means the
+        // next statement they add inside it rides along instead of stopping the patch.
         file: 'webview/index.js',
-        find: /onChange:\(([\w$]+)\)=>([\w$]+)\(\1\.target\.value\),placeholder:"Search sessions…"/,
-        replace: (_found, param, setter) =>
-            `onChange:(${param})=>{${setter}(${param}.target.value);` +
+        find: /onChange:\(([\w$]+)\)=>\{([^{}]*)\},placeholder:"Search sessions…"/,
+        replace: (_found, param, body) =>
+            `onChange:(${param})=>{${body};` +
             `globalThis.__ccx&&globalThis.__ccx.onSearchQuery&&globalThis.__ccx.onSearchQuery(${param}.target.value,` +
             `(globalThis.__ccxSearchCandidates||[]).map((s)=>s.sessionId.value))},placeholder:"Search sessions…"`,
         where: 'replace',

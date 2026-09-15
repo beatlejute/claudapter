@@ -399,8 +399,16 @@ that follows it — the one piece of this trio that survives minification unchan
 user-facing text:
 
 ```js
-onChange:\(([\w$]+)\)=>([\w$]+)\(\1\.target\.value\),placeholder:"Search sessions…"
+onChange:\(([\w$]+)\)=>\{([^{}]*)\},placeholder:"Search sessions…"
 ```
+
+The handler body is captured whole and re-emitted verbatim, rather than rebuilt from a captured setter
+name. Through 2.1.269 it was a single bare call, `(X1)=>i1(X1.target.value)`; 2.1.272 turned it into a
+block with a second setter in it, `{X0(Y1.target.value),I2(!0)}`, and a signature that spelled out one
+call matched zero times. Taking the block as an opaque statement list means the next statement they add
+inside it rides along instead of stopping the patch — which is why this is the only signature here that
+captures a *body* instead of a name. The cost is that a nested `{…}` in that body would end the match
+early, so it fails loudly rather than quietly if they ever put a closure in there.
 
 It forwards every keystroke to `globalThis.__ccx.onSearchQuery` alongside the id list read off the
 global above. `src/webview.js` owns everything from there: a 250 ms debounce, an immediate clear of
