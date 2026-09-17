@@ -283,7 +283,7 @@ console.log('OK — the page adds a switch of the app\'s own and compacts on the
 // --- Part 3: the menu sort order names the new id ----------------------------------------------
 
 const patcher = readFileSync(new URL('../scripts/apply-patch.mjs', import.meta.url), 'utf8');
-assert.match(patcher, /"toggle-thinking","ccx-autocompact","switch-models-on-flag"/, 'the new id sits under Thinking');
+assert.match(patcher, /"toggle-thinking","ccx-autocompact",/, 'the new id sits under Thinking');
 assert.match(
     patcher,
     /find:\s*'\["model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"\]'/,

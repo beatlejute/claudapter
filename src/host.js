@@ -16,6 +16,7 @@ const BINDINGS_FILE = path.join(DIR, 'bindings.json');
 const HIDDEN_FILE = path.join(DIR, 'hidden-messages.json');
 const PINNED_FILE = path.join(DIR, 'pinned.json');
 const HEALTH_FILE = path.join(DIR, 'agent-health.json');
+const HISTORY_FILE = path.join(DIR, 'full-history.json');
 const ICON_EXTENSIONS = ['png', 'svg'];
 // An icon is inlined into the webview as base64 — past this size it is a mistake, not an icon
 const MAX_ICON_BYTES = 512 * 1024;
@@ -747,6 +748,65 @@ function searchTranscripts(query, sessionIds) {
     return out;
 }
 
+// --- History before compaction ---------------------------------------------------------------
+//
+// A compaction deletes nothing. The CLI appends a compact_boundary and a summary, and every line
+// before them stays in the .jsonl. What hides that part is how the extension rebuilds a transcript
+// for the page, in two places:
+//
+//   - the walk goes back along parentUuid from the newest message, and the boundary is written with
+//     `parentUuid: null` — the link to the conversation it closed survives only as logicalParentUuid;
+//   - a file over 5 MB is not even parsed before its last boundary: the reader seeks past those bytes.
+//
+// With the switch on, both readers in extension.js ask here first (injection points #11 and #12). The
+// size shortcut is skipped, and every boundary is joined back to the chain it closed before the stock
+// walk runs. Only the page's copy changes: the CLI rebuilds its own context from the same file in a
+// different process, and that one still stops at the boundary.
+//
+// Read from disk on every call rather than cached in S. Each VS Code window is its own extension host
+// with its own S, and the switch flipped in one window has to reach the next session opened in another.
+function historyBeforeCompaction() {
+    const raw = readJson(HISTORY_FILE);
+    return Boolean(raw && raw.enabled === true);
+}
+
+function setHistoryBeforeCompaction(enabled) {
+    writeJson(HISTORY_FILE, { enabled: Boolean(enabled) });
+}
+
+// `byUuid` is the stock walk's own map, taken before it relinks anything. Every compaction keeps a short
+// tail of the conversation (compactMetadata.preservedMessages), and the walk moves that tail to just
+// after the summary. So a boundary is joined to what preceded the tail, not to logicalParentUuid: that
+// IS the tail's last message, and linking there would lead the walk back into the tail it had just
+// left — the loop guard would end the history right there, one compaction deep.
+//
+// The kept-list conditions mirror the stock relink exactly. A list with a uuid missing from the map is
+// not relinked at all, so the tail stays where it was and logicalParentUuid is the right link after all.
+function stitchCompactions(byUuid) {
+    if (!(byUuid instanceof Map) || !historyBeforeCompaction()) return 0;
+    let stitched = 0;
+    for (const [uuid, entry] of byUuid) {
+        if (!entry || entry.type !== 'system' || entry.subtype !== 'compact_boundary' || entry.parentUuid) continue;
+        const logical = entry.logicalParentUuid;
+        // Absent when the part before was never read — a transcript continued from another session
+        if (typeof logical !== 'string' || !byUuid.has(logical)) continue;
+        const meta = entry.compactMetadata || {};
+        let head = null;
+        if (meta.preservedMessages) {
+            const kept = meta.preservedMessages.uuids;
+            if (Array.isArray(kept) && kept.length && kept.every((id) => byUuid.has(id))) head = kept[0];
+        } else if (meta.preservedSegment && byUuid.has(meta.preservedSegment.headUuid)) {
+            head = meta.preservedSegment.headUuid;
+        }
+        // A kept tail that starts the whole transcript leaves nothing before it to show
+        const parent = head ? byUuid.get(head).parentUuid : logical;
+        if (!parent || !byUuid.has(parent)) continue;
+        byUuid.set(uuid, { ...entry, parentUuid: parent });
+        stitched++;
+    }
+    return stitched;
+}
+
 // --- When each message was actually sent, keyed by message uuid ------------------------------
 //
 // The webview cannot answer this about its own transcript. Its message class declares
@@ -1121,6 +1181,7 @@ function stateFor(sessionId, webview) {
         hiddenMessages: hiddenMessagesFor(sessionId),
         // Not about this tab's session — the whole list, since the history list is what reads it
         pinnedSessions: loadPinned(),
+        historyBeforeCompaction: historyBeforeCompaction(),
         models: active && active !== 'claude' ? modelsOf(active) : null,
         // `now` rather than a per-row Date.now(): every age in the panel is then measured from the
         // same instant, so two rows probed together never read as a minute apart.
@@ -1731,6 +1792,11 @@ function attachWebview(webview) {
                 // Every tab draws the same history list, so all of them have to be told.
                 broadcast();
             }
+        } else if (m.type === 'ccx:historyBeforeCompaction') {
+            setHistoryBeforeCompaction(m.enabled);
+            dlog('history before compaction', { enabled: Boolean(m.enabled) });
+            // One switch for every tab: each of them draws it in its own menu.
+            broadcast();
         } else if (m.type === 'ccx:openProfile') {
             openProfileFile(m.name);
         } else if (m.type === 'ccx:hideMessages') {
@@ -1772,4 +1838,12 @@ function attachPanel(panel) {
     decorate(panel);
 }
 
-module.exports = { renderScript, attachPanel, envFor, profileIcons, agentRunsPayload };
+module.exports = {
+    renderScript,
+    attachPanel,
+    envFor,
+    profileIcons,
+    agentRunsPayload,
+    historyBeforeCompaction,
+    stitchCompactions,
+};

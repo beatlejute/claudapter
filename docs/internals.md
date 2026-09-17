@@ -805,6 +805,64 @@ What it cannot do is show an old run. `B5t`, the transcript → SDK-message conv
 outright (`if (e.isSidechain) return !1`), so a session replayed from disk comes back without any of its
 subagents' turns. Watching a run is live-only unless the `.jsonl` is read separately.
 
+### A compaction hides history three times, and deletes none of it (2.1.274)
+
+`/compact` and auto-compaction only append. The transcript gets a `system`/`compact_boundary` line and a
+user line carrying the summary (`isCompactSummary: true`, `isVisibleInTranscriptOnly: true`), and every
+earlier line stays where it was. Across 215 compacted transcripts on one machine, all 561 boundaries look
+like this:
+
+```js
+{ type: "system", subtype: "compact_boundary", parentUuid: null, logicalParentUuid: "<last message before>",
+  compactMetadata: { trigger, preTokens,
+    preservedSegment:  { headUuid, anchorUuid: "<summary>", tailUuid },
+    preservedMessages: { anchorUuid: "<summary>", uuids: [head, …, tail], allUuids: […] } } }
+```
+
+A reopened session still starts at the last boundary, and three separate mechanisms make it do that.
+
+**The walk.** `get_session_request` → `getSession` → `readSessionForHost` → the SDK's `getSessionMessages`,
+which bottoms out in an async walk (`Hq0` for the default projects dir, `ZE0` for a `CLAUDE_CONFIG_DIR`
+one, byte-identical). It indexes every line by uuid, relinks the kept tail, picks the newest
+non-sidechain user/assistant leaf and follows `parentUuid` back to the root. The boundary's `parentUuid`
+is null, so the root is the boundary.
+
+The relink matters for the fix. Every compaction keeps a short tail of the conversation (`uuids`, usually
+the last prompt and its answer). The walk chains those uuids after the summary (`uuids[0].parentUuid =
+anchor`, each next one onto the previous), then moves every other child of the summary onto the last kept
+uuid. And `logicalParentUuid` **is** that last kept uuid. Joining the boundary to it builds
+`tail → … → head → summary → boundary → tail`, and the walk's loop guard (`if (seen.has(uuid)) break`)
+stops right there. Nothing crashes, and no older history appears either. The boundary has to be joined to
+`uuids[0]`'s parent as read from disk, before the relink rewrites it, which is why injection point #11
+sits between the index and the relink.
+
+The relink also has a precondition the stitch mirrors: a `preservedMessages` whose uuids are not all in the
+map is skipped entirely (`continue`, and `preservedSegment` is not tried either). The tail then stays in its
+original place and `logicalParentUuid` is the correct join after all.
+
+**The reader.** In front of the walk, a transcript over `5242880` bytes is not read whole unless
+`CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP` is set. It is scanned for the last boundary and only
+`postBoundaryBuf` is returned, so the earlier uuids never reach the map and there is nothing to join to. That
+variable cannot simply be set in the extension host: `envFor` passes the host's environment on to every CLI
+it spawns. Injection point #12 adds the switch to the condition instead.
+
+**The page.** Even a complete list gets trimmed on arrival. `vE1(messages, opts)` returns everything up to
+`600` messages and otherwise removes messages until `500` remain. Tool-only turns go first (the recent 100
+are protected on the live path), then the oldest. There is no list virtualisation behind it, so the cap is
+the page's only defence against a long transcript. It is applied both in `loadFromServer` and while a tab is
+live. Injection point #13 lifts it while the switch is on.
+
+The summary itself loses its flag on the way into the page. The SDK message carries `isCompactSummary`,
+but the page's message class (`OT` → `new TZ(...)`) copies neither that nor `is_meta`, and loaded history
+has no `compact` divider either, because system lines are filtered out before the page sees them. The page
+therefore learns which uuids are summaries from the raw `get_session_response` as it passes through
+`window` messages. A live compaction is recognisable without that: it leaves a `TZ("compact")` item in
+`session.messages`.
+
+Checked end to end against the stock walk: the patched bundle's `Hq0` run over ten real transcripts (up to
+14 compactions, up to 5200 lines) returns the stock result as an exact suffix, no uuid twice, and the
+first line of the file at the front, except where the transcript itself had no chain back that far.
+
 ### Why the provider list is an entry of its own, not a section inside Account & Usage
 
 The obvious home for it is the stock *Account & Usage* dialog, and that was the first shape: find the panel, append a section under *Usage*. It works, and it is the wrong trade.

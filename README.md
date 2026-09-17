@@ -28,6 +28,7 @@ Claudapter moves that switch into the UI and makes it **per tab**: one tab can r
 - **Per-tab switching** — the `claude` process restarts on the same channel with `resume`, so the conversation history survives. Other tabs are untouched. On a tab that has not sent anything yet there is nothing to resume, so it starts fresh instead — the toast says which.
 - **Compact before switching** — on a tab with history the switch first asks *Compact & switch* / *Switch as is*. The prompt cache never survives a provider change, so the first turn on the new backend pays for the whole transcript either way; sending the compact summary instead of the raw history is what makes it cheaper, and it keeps a long conversation inside a smaller window on the other side. It is a question, not a default — compaction discards detail. Left unanswered it switches as is; if the compaction never reports back it switches as is after 90 s. A tab with nothing to compact is never asked.
 - **Auto-compact before the cache expires** — a switch under *Thinking* in the *Model* section, off by default. Anthropic's prompt cache is billed per tier and lapses on its own; where a turn was cached at the 1-hour tier, leaving the tab idle past that hour means the next message re-caches the whole transcript. With the switch on, a `/compact` is run five minutes before that happens, so the summary is written while the prefix is still warm and the conversation comes back smaller. Only the 1-hour tier is acted on — the 5-minute one expires too soon for a wait to mean anything — and a turn still running postpones the compaction rather than queueing behind it. The switch is remembered per window; a tab on a proxied provider never sees the signal, so the setting sits inert there.
+- **History before compaction** — a switch directly under *Auto-compact before cache expiry*, off by default. A `/compact` (manual or automatic) deletes nothing from the session's `.jsonl`, but a reopened session only shows what came after the last compaction. With the switch on, the whole conversation comes back, every compaction included, with each summary where it happened. It is a **view only**: the model's context is still the summary and what followed it. See [History before compaction](#history-before-compaction).
 - **Switching back to Anthropic keeps working.** The CLI feeds the previous answer's id back to Anthropic as `diagnostics.previous_message_id`, and an id minted by another provider (OpenRouter's `gen-1787815743-…`) is rejected with a `400` — every turn, forever, because the id is re-read from the transcript on each relaunch. A session that had answered elsewhere was simply unreachable from Anthropic. The spawn that goes to Anthropic now drops those ids from the transcript first; ids Anthropic itself issued are left alone, and so is every spawn going anywhere else.
 - **Tab icon per provider** — the extension's own pending/done indicators keep working: the dot is drawn over the provider icon instead of replacing it.
 - **Provider icon in the session history** — every past session carries its provider's brand mark, in the history list and in the sessions sidebar. A session with no recorded binding ran on whatever `settings.json` said, so it shows that profile's mark — the stock Claude logo on an untouched install.
@@ -378,7 +379,7 @@ The bound profile is highlighted, so the list also says which of these the tab i
 
 ## How it works
 
-The logic lives **outside** the extension, in `~/.claude/claudapter`. Only ten short calls are injected into the bundle, so editing the UI needs no re-patching — a window reload is enough.
+The logic lives **outside** the extension, in `~/.claude/claudapter`. Only fifteen short calls are injected into the bundle, so editing the UI needs no re-patching — a window reload is enough.
 
 ```
 VS Code extension host                     webview (UI)
@@ -407,6 +408,15 @@ VS Code extension host                     webview (UI)
 | 8 | `webview/index.js` | *structural* — the `openState` accessor, above the memo that sorts by it | hands that accessor to the page on `globalThis` |
 | 9 | `webview/index.js` | *structural* — the open-first memo itself | orders the list the app renders: pinned, running, open, closed |
 | 10 | `webview/index.js` | `onChange:(e)=>{…},placeholder:"Search sessions…"` | forwards every keystroke to the host-side transcript search |
+| 11 | `extension.js` ×2 | *structural* — the transcript walk, between its uuid index and the relink of the kept tail | joins each `compact_boundary` back to the conversation it closed |
+| 12 | `extension.js` ×2 | `if(size>limit&&!env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP)` in the transcript reader | reads a large transcript whole instead of from its last boundary |
+| 13 | `webview/index.js` | *structural* — the cap function, `if(list.length<=600)return{messages:list,…}` | lifts the 600/500 message cap |
+| 14 | `webview/index.js` | *structural* — the message-action menu, after its `sessionId` guard | no fork/rewind menu above the last compaction |
+| 15 | `webview/index.js` | *structural* — the *Rewind* list's prompt filter | leaves prompts above the last compaction out of that list |
+
+\#11–#15 do nothing while *History before compaction* is off. The walk and the reader exist twice in
+`extension.js`, once for the default projects directory and once for a `CLAUDE_CONFIG_DIR` one, so both
+anchors must match exactly twice.
 
 ### Sending an attachment on its own
 
@@ -545,6 +555,43 @@ Two costs worth knowing. Ctrl+Shift+Z is **redo** inside the composer, and that 
 Ctrl+Z is untouched. And recalling the text alone needs none of this — **↑** in an empty composer
 already cycles your previous messages, without touching the conversation.
 
+### History before compaction
+
+A compaction appends two lines to the transcript, a `compact_boundary` and the summary, and deletes
+nothing. What hides the older part is how the extension rebuilds a transcript for the page: it walks
+`parentUuid` back from the newest message, and the boundary is written with `parentUuid: null`. The link
+to the conversation it closed survives only as `logicalParentUuid`. A file over 5 MB is not even parsed
+before its last boundary.
+
+With *History before compaction* switched on (in the *Model* section of the command menu, under
+*Auto-compact before cache expiry*):
+
+1. the host joins every boundary back to the conversation it closed, just before the stock walk runs.
+   Each compaction keeps a short tail of the conversation and shows it after the summary, so the
+   boundary is joined to the message *before* that tail. The tail appears once, where the stock page
+   already shows it;
+2. the 5 MB shortcut is skipped, so a large transcript is read whole;
+3. the page's own cap on the transcript is lifted. Past 600 messages the page normally keeps 500, dropping
+   tool-only turns first and then the oldest. That applies to a tab that stays open as well, and while the
+   switch is on nothing is dropped;
+4. messages above the last compaction lose the message-action menu (*Fork conversation from here*,
+   *Rewind code to here*, *Fork and rewind*) and drop out of the *Rewind* list. From there, every one
+   of these forks the uncompacted transcript up to that point, which means a first turn with no cache
+   and possibly one close to the context limit.
+
+What it does not change:
+
+- **What the model sees.** The CLI rebuilds its context from the same file in a separate process, and
+  that rebuild still starts at the last compaction. A message above the summary is on screen but not in
+  the model's context, so "as I said above" will not reach it.
+- **A tab that is already open.** Rebuilding its transcript would mean relaunching its CLI, so the switch
+  applies to the next session opened (or the next window reload).
+- **Speed on long sessions.** The page has no list virtualisation. A session with thousands of messages
+  takes noticeably longer to open and scroll, and the uncapped list applies to a live tab too while the
+  switch is on.
+
+The switch is stored in `~/.claude/claudapter/full-history.json` and shared by every tab and window.
+
 ### Searching sessions by content
 
 The stock search box in the session list only matches a row's title and git branch, both already
@@ -617,6 +664,7 @@ Keys "owned" by profiles are computed as the union of every `env` across `~/.cla
 
 - `~/.claude/claudapter/bindings.json` — `{ sessionId: profileName }`, survives VS Code restarts. It is also what the history list reads to mark each row; a session that was never launched through Claudapter has no entry and falls back to the profile matching `settings.json`.
 - `~/.claude/claudapter/pinned.json` — the session ids pinned to the top of the history list, in the order they were pinned. Shared by every tab; an entry is dropped when its session is deleted.
+- `~/.claude/claudapter/full-history.json` — `{ "enabled": true|false }`, the *History before compaction* switch. Shared by every tab and window; read each time a transcript is rebuilt.
 - the tab's profile in memory — for the window between choosing a provider and the session being created
 - `~/.claude/settings.json` is **never modified**
 

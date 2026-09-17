@@ -18,6 +18,11 @@ const HOST_REQUIRE =
     '/*__ccx*/let __p=require("path").join(require("os").homedir(),".claude","claudapter","host.js");' +
     'delete require.cache[require.resolve(__p)];';
 
+// For the hooks that run on every transcript read rather than once per tab: the module as already loaded.
+// Dropping the cache there would re-evaluate host.js on each session opened, and the hooks above already
+// refresh it often enough for an edited host.js to reach these on its own.
+const HOST_LOAD = '/*__ccx*/let __p=require("path").join(require("os").homedir(),".claude","claudapter","host.js");';
+
 const PATCHES = [
     {
         // Was a plain literal until 2.1.245, which renamed every local in it: the nonce (`u` → `U`), the
@@ -129,7 +134,7 @@ const PATCHES = [
         file: 'webview/index.js',
         find: '["model","effort-level","toggle-thinking","switch-models-on-flag","account-usage"]',
         replace:
-            '["ccx-provider","model","effort-level","toggle-thinking","ccx-autocompact","switch-models-on-flag","ccx-health","account-usage"]/*__ccx*/',
+            '["ccx-provider","model","effort-level","toggle-thinking","ccx-autocompact","ccx-full-history","switch-models-on-flag","ccx-health","account-usage"]/*__ccx*/',
         where: 'replace',
     },
     // --- Search sessions by content, and pinned sessions (five hooks in one component) -----------
@@ -249,6 +254,77 @@ const PATCHES = [
             `onChange:(${param})=>{${body};` +
             `globalThis.__ccx&&globalThis.__ccx.onSearchQuery&&globalThis.__ccx.onSearchQuery(${param}.target.value,` +
             `(globalThis.__ccxSearchCandidates||[]).map((s)=>s.sessionId.value))},placeholder:"Search sessions…"`,
+        where: 'replace',
+    },
+    // --- History before compaction (five hooks, all inert while the switch is off) ---------------
+    //
+    // The transcript the page opens is rebuilt by extension.js, and the bundle carries that code twice:
+    // once for the default projects directory and once for a CLAUDE_CONFIG_DIR one. Which copy runs
+    // depends on the machine, so #11 and #12 patch both and expect exactly two hits each.
+    {
+        // The walk that turns transcript lines into the conversation. It indexes every line by uuid,
+        // relinks each compaction's kept tail, then follows parentUuid back from the newest message —
+        // and a compact_boundary's parentUuid is null, so that is where the page's history starts.
+        // The hook runs between the index and the relink, while every parentUuid is still the one on
+        // disk, and gives each boundary back its real parent. The relink loop that follows is the
+        // anchor, so the hook cannot drift in front of the index it needs.
+        file: 'extension.js',
+        hits: 2,
+        find: /(async function [\w$]+\(([\w$]+)\)\{let ([\w$]+)=new Map;for\(let ([\w$]+) of \2\)\3\.set\(\4\.uuid,\4\);)(let [\w$]+=0;for\(let ([\w$]+) of \3\.values\(\)\)\{if\(\6\.type!=="system"\|\|\6\.subtype!=="compact_boundary"\)continue;)/,
+        replace: (_found, index, _lines, byUuid, _line, relink) =>
+            `${index}(()=>{try{${HOST_LOAD}require(__p).stitchCompactions(${byUuid})}catch(__e){}})();${relink}`,
+        where: 'replace',
+    },
+    {
+        // The reader in front of that walk. Past 5 MB it hands over only the bytes after the last
+        // boundary, so there would be nothing to stitch to. The stock opt-out is an environment
+        // variable, and setting it in the extension host would leak into every CLI it spawns.
+        file: 'extension.js',
+        hits: 2,
+        find: /if\(([\w$]+)>([\w$]+)&&!([\w$]+)\.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP\)(return\(await [\w$]+\()/,
+        replace: (_found, size, limit, env, tail) =>
+            `if(${size}>${limit}&&!${env}.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP&&` +
+            `!(()=>{try{${HOST_LOAD}return require(__p).historyBeforeCompaction()}catch(__e){return!1}})())${tail}`,
+        where: 'replace',
+    },
+    {
+        // The page's own cap: past 600 messages it keeps 500, dropping tool-only turns first and then
+        // the oldest. It applies to a live tab as much as to a reopened one, and a history that reaches
+        // back past a compaction crosses it on any long session.
+        file: 'webview/index.js',
+        find: /(function [\w$]+\(([\w$]+),[\w$]+\)\{if\()(\2\.length<=[\w$]+)(\)return\{messages:\2,removedIndices:\[\]\};)/,
+        replace: (_found, head, _list, cond, tail) =>
+            `${head}${cond}||globalThis.__ccx&&globalThis.__ccx.keepEveryMessage&&globalThis.__ccx.keepEveryMessage()${tail}`,
+        where: 'replace',
+    },
+    {
+        // A user message's action menu — fork from here, rewind code, fork and rewind. From a message
+        // before the compaction every one of them forks the uncompacted transcript up to that point,
+        // so the button is not rendered there. Placed after the component's hooks, where the stock
+        // code already returns null for a tab with no session id.
+        file: 'webview/index.js',
+        find: /let ([\w$]+)=([\w$]+)\.sessionId\.value;if\(!\1\)return null;let ([\w$]+)=\2\.messages\.value,([\w$]+)=void 0;for\(let ([\w$]+)=\3\.indexOf\(([\w$]+)\)-1;/,
+        replace: (found, id, session, _list, _previous, _i, message) =>
+            found.replace(
+                `if(!${id})return null;`,
+                () =>
+                    `if(!${id})return null;if(globalThis.__ccx&&globalThis.__ccx.beforeCompaction&&` +
+                    `globalThis.__ccx.beforeCompaction(${session}.messages.value,${message}))return null;`,
+            ),
+        where: 'replace',
+    },
+    {
+        // The same fork reached from the other side: Rewind in the Context section lists every prompt
+        // of the tab to pick one. Messages before the compaction are left out of that list.
+        file: 'webview/index.js',
+        find: /for\(let ([\w$]+)=0;\1<([\w$]+)\.length;\1\+\+\)\{let ([\w$]+)=\2\[\1\];if\(\3\.type!=="user"\|\|\3\.isSynthetic\|\|!\3\.uuid\|\|\3\.parentToolUseId\)continue;/,
+        replace: (found, _i, list, message) =>
+            found.replace(
+                `||${message}.parentToolUseId)continue;`,
+                () =>
+                    `||${message}.parentToolUseId||globalThis.__ccx&&globalThis.__ccx.beforeCompaction&&` +
+                    `globalThis.__ccx.beforeCompaction(${list},${message}))continue;`,
+            ),
         where: 'replace',
     },
 ];
@@ -411,6 +487,11 @@ function countHits(src, find) {
     return (src.match(new RegExp(find.source, flags)) || []).length;
 }
 
+function everyMatch(find) {
+    if (typeof find === 'string') return new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+    return find.flags.includes('g') ? find : new RegExp(find.source, find.flags + 'g');
+}
+
 // Replacing through a function keeps `$` sequences in the injected code literal
 function expand(patch, match) {
     const [found] = match;
@@ -433,9 +514,14 @@ function apply(dir) {
 
         let src = readFileSync(backupPath(file), 'utf8');
         for (const p of patches) {
+            // A few anchors sit in code the bundle carries twice, and `hits` says so. Anything else
+            // still has to match exactly once: a second hit there means the anchor stopped being unique.
+            const expected = p.hits || 1;
             const hits = countHits(src, p.find);
-            if (hits !== 1) throw Error(`${rel}: signature matched ${hits} times — bundle changed:\n  ${p.find}`);
-            src = src.replace(p.find, (...match) => expand(p, match));
+            if (hits !== expected)
+                throw Error(`${rel}: signature matched ${hits} times (expected ${expected}) — bundle changed:\n  ${p.find}`);
+            const find = expected > 1 ? everyMatch(p.find) : p.find;
+            src = src.replace(find, (...match) => expand(p, match));
         }
         writeFileSync(file, src, 'utf8');
         checkSyntax(file);

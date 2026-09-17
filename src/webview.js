@@ -72,6 +72,11 @@
     var pinnedIds = new Set();
     var pinSetter = null;
     var pinPushed = null;
+    // Uuids of the summary each compaction wrote, as the host's get_session_response marks them. The
+    // page's own message objects drop that flag, so this is the only way to tell a summary apart from
+    // an ordinary prompt once a transcript has been rebuilt from disk.
+    var compactSummaryUuids = new Set();
+    var compactionEdges = typeof WeakMap === 'function' ? new WeakMap() : null;
 
     function send(message) {
         rawPost(message);
@@ -145,6 +150,17 @@
                 },
                 'Model',
                 toggleAutocompact
+            );
+            registry.registerAction(
+                {
+                    id: 'ccx-full-history',
+                    label: 'History before compaction',
+                    description: 'Show what /compact folded away when a session opens — view only, not sent to the model',
+                    trailingComponent: historyTick(),
+                    keepMenuOpen: true,
+                },
+                'Model',
+                toggleHistoryBeforeCompaction
             );
         } catch (e) {
             console.warn('ccx: registerAction failed', e);
@@ -320,6 +336,8 @@
                     noteSession(msg.channelId, inner.session_id);
                 if (inner.type === 'system' && inner.subtype === 'compact_boundary')
                     onCompactBoundary(msg.channelId);
+            } else if (msg.type === 'response' && msg.response && msg.response.type === 'get_session_response') {
+                noteCompactSummaries(msg.response.messages);
             } else if (msg.type === 'close_channel' && pendingRestart && msg.channelId === pendingRestart.channelId) {
                 var job = pendingRestart;
                 pendingRestart = null;
@@ -339,7 +357,9 @@
                 // one instant instead of from whenever each row happened to be drawn.
                 now: d.now || Date.now(),
                 sessionId: d.sessionId || state.sessionId,
+                historyBeforeCompaction: d.historyBeforeCompaction === true,
             };
+            rememberHistoryBeforeCompaction(state.historyBeforeCompaction);
             adoptAttachmentPrompts(d.attachmentPrompts);
             adoptPinned(d.pinnedSessions);
             // Retracted uuids arrive from the host; a session change resets the set, otherwise the
@@ -1607,6 +1627,85 @@
         }
     }
 
+    // --- History before compaction --------------------------------------------------------------
+    //
+    // The switch lives on the host (full-history.json), because the host is what rebuilds a transcript
+    // when a session opens and no page is asked first. The page mirrors it for its own two jobs: lifting
+    // the 600-message cap, and keeping fork/rewind away from the part of a transcript the model no
+    // longer has. Both run while the transcript is being rebuilt, which can be before the first state
+    // push reaches a fresh page, so the last value seen is kept in localStorage to start from.
+    var HISTORY_KEY = 'ccx.historyBeforeCompaction';
+
+    function rememberHistoryBeforeCompaction(on) {
+        try {
+            window.localStorage.setItem(HISTORY_KEY, on ? '1' : '0');
+        } catch (e) {
+            /* the host's state push still carries it */
+        }
+    }
+
+    function historyBeforeCompactionPref() {
+        if (typeof state.historyBeforeCompaction === 'boolean') return state.historyBeforeCompaction;
+        try {
+            return window.localStorage.getItem(HISTORY_KEY) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function historyTick() {
+        if (!jsx) return undefined;
+        return stockToggle(historyBeforeCompactionPref());
+    }
+
+    // Nothing reloads here. Rebuilding the open transcript means relaunching its CLI, which is not
+    // something a view switch should do to a session mid-turn — the next session opened picks it up.
+    function toggleHistoryBeforeCompaction() {
+        var next = !historyBeforeCompactionPref();
+        state.historyBeforeCompaction = next;
+        rememberHistoryBeforeCompaction(next);
+        send({ type: 'ccx:historyBeforeCompaction', enabled: next });
+        syncAction();
+        toast(next
+            ? 'History before compaction is on — reopen a session to see it'
+            : 'History before compaction is off — sessions opened from now on start at the last compaction');
+    }
+
+    function keepEveryMessage() {
+        return historyBeforeCompactionPref();
+    }
+
+    function noteCompactSummaries(messages) {
+        if (!Array.isArray(messages)) return;
+        for (var i = 0; i < messages.length; i++) {
+            var m = messages[i];
+            if (m && m.isCompactSummary === true && typeof m.uuid === 'string') compactSummaryUuids.add(m.uuid);
+        }
+    }
+
+    // True for a message that sits above the last compaction in `list`: a summary rebuilt from disk, or
+    // the divider a compaction leaves in a live tab. Messages the compaction kept come after the summary
+    // and stay actionable — the model still has those.
+    //
+    // Asked once per rendered prompt, over a list that can now run to thousands of messages, so the
+    // position of every message and of the edge are indexed once per list. A list the app appends to in
+    // place changes length, and that is what invalidates the entry.
+    function beforeCompaction(list, message) {
+        if (!historyBeforeCompactionPref() || !Array.isArray(list) || !message) return false;
+        var edge = compactionEdges && compactionEdges.get(list);
+        if (!edge || edge.length !== list.length) {
+            edge = { length: list.length, last: -1, index: new Map() };
+            for (var i = 0; i < list.length; i++) {
+                var m = list[i];
+                edge.index.set(m, i);
+                if (m && (m.type === 'compact' || (m.uuid && compactSummaryUuids.has(m.uuid)))) edge.last = i;
+            }
+            if (compactionEdges) compactionEdges.set(list, edge);
+        }
+        var at = edge.index.get(message);
+        return at !== undefined && at < edge.last;
+    }
+
     function buildSidebarSection(stack) {
         var section = document.createElement('div');
         section.className = 'ccx-side-section';
@@ -2832,6 +2931,8 @@
         onPinState: onPinState,
         pinSort: pinSort,
         retract: retractLastMessage,
+        keepEveryMessage: keepEveryMessage,
+        beforeCompaction: beforeCompaction,
     };
 
     // styles
