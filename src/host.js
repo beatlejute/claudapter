@@ -758,7 +758,7 @@ function searchTranscripts(query, sessionIds) {
 //     `parentUuid: null` — the link to the conversation it closed survives only as logicalParentUuid;
 //   - a file over 5 MB is not even parsed before its last boundary: the reader seeks past those bytes.
 //
-// With the switch on, both readers in extension.js ask here first (injection points #11 and #12). The
+// With the switch on, both readers in extension.js ask here first (injection points #12 and #13). The
 // size shortcut is skipped, and every boundary is joined back to the chain it closed before the stock
 // walk runs. Only the page's copy changes: the CLI rebuilds its own context from the same file in a
 // different process, and that one still stops at the boundary.

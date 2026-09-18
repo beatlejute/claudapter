@@ -73,7 +73,7 @@ const PATCHES = [
         // keeps the enclosing `if(` arity intact, `;` on 2.1.227+ closes the bare statement.
         //
         // 2.1.245 put `$`-prefixed names into extension.js for the first time, so every class here is
-        // `[w$]+` rather than `w+` — the same widening points #4 and #6–#10 already needed in the webview
+        // `[w$]+` rather than `w+` — the same widening points #4 and #6–#11 already needed in the webview
         // bundle. It has not bitten this signature yet (2.1.245 is `q.env=Z;`), but it broke #1 and #2.
         //
         // 2.1.274 made the assigned env an *expression* rather than a local: `M.env=Ba$(E,H===!0)`, where that
@@ -104,7 +104,7 @@ const PATCHES = [
         //
         // Two things here were name-shaped rather than structural until 2.1.239. The helper calls were
         // `\w+`, and 2.1.239 renamed the claudeConfig one to `$b` — `\w` does not match `$`, so the whole
-        // signature dropped to zero hits, the same trap points #6–#10 already document. And the jsx factory
+        // signature dropped to zero hits, the same trap points #6–#11 already document. And the jsx factory
         // was written into the replacement as a literal `b`; it has been `b` in every release seen so far,
         // but a rename would have produced a ReferenceError at render time rather than a patch-time error.
         // It is now captured off the `trailingComponent:` expression that follows, three literal strings
@@ -182,14 +182,23 @@ const PATCHES = [
         // `filter((s)=>{let q=query.toLowerCase();return …})` is now `q=query.toLowerCase(),result=…filter((s)=>…)`
         // with a concise arrow body. The hoisted local is the anchor's first capture now, and the
         // rewritten predicate has to stay an expression — a `{…}` body here would return undefined.
+        //
+        // The predicate is also where the two kinds of hit are told apart, because it is the only place
+        // that evaluates the name half: every id whose own name or branch matched is recorded in
+        // __ccxTitleMatches, and #9's sort reads that set to rank name hits above transcript-only ones.
+        // The set is rebuilt on every render — this expression re-runs with the component, and a set
+        // left over from an earlier query would rank rows by a word no longer in the box. A query-less
+        // render sets it to null instead, which is the sort's signal that there is nothing to rank by.
         file: 'webview/index.js',
         find: /([\w$]+)=([\w$]+)\.toLowerCase\(\),([\w$]+)=\2\?([\w$]+)\.filter\(\(([\w$]+)\)=>([\w$]+)\(\5\)\.toLowerCase\(\)\.includes\(\1\)\|\|\(\5\.gitBranch\.value\?\.toLowerCase\(\)\.includes\(\1\)\?\?!1\)\):\4/,
         replace: (_found, lowerQ, query, result, source, item, titleFn) =>
             `${lowerQ}=${query}.toLowerCase(),${result}=(globalThis.__ccxSearchCandidates=${source},` +
+            `globalThis.__ccxTitleMatches=${query}?new Set():null,` +
             `${query}?${source}.filter((${item})=>` +
-            `${titleFn}(${item}).toLowerCase().includes(${lowerQ})||` +
-            `(${item}.gitBranch.value?.toLowerCase().includes(${lowerQ})??!1)||` +
-            `(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)):${source})`,
+            `(${titleFn}(${item}).toLowerCase().includes(${lowerQ})||` +
+            `(${item}.gitBranch.value?.toLowerCase().includes(${lowerQ})??!1))` +
+            `?(globalThis.__ccxTitleMatches.add(${item}.sessionId.value),!0)` +
+            `:(ccxContentMatches?ccxContentMatches.has(${item}.sessionId.value):!1)):${source})`,
         where: 'replace',
     },
     {
@@ -225,16 +234,22 @@ const PATCHES = [
         //
         // The stock partition is a coarser version of the same idea — open first, everything else
         // after, no pins and no running/idle distinction — and pinSort re-blocks its output into all
-        // four ranks, so the two compose rather than fight.
+        // its own ranks, so the two compose rather than fight.
         //
         // The memo itself has held from 2.1.257 through 2.1.259; only the accessor moved, which is why
         // that half is the separate point above.
+        //
+        // The fourth argument is the search ordering: the ids #7 saw match by name, so a row found by
+        // its title ranks above one found only in its transcript. It is read off globalThis for the
+        // same reason the accessor is — #7's locals are a statement away and not in scope here — and
+        // it is null on a query-less render, which leaves the order as pins-and-liveness alone.
         file: 'webview/index.js',
         find: /,([\w$]+)=[\w$]+\(\(\)=>\{if\(!([\w$]+)\)return ([\w$]+);return [\w$]+\(\3,\(([\w$]+)\)=>[\w$]+\(\4\)===!0\)\},\[\3,\2,[\w$]+\]\)/,
         replace: (found, sorted) =>
             found +
             `,ccxPinSorted=(${sorted}=globalThis.__ccx&&globalThis.__ccx.pinSort` +
-            `?globalThis.__ccx.pinSort(${sorted},ccxPinnedIds,globalThis.__ccxOpenState):${sorted})`,
+            `?globalThis.__ccx.pinSort(${sorted},ccxPinnedIds,globalThis.__ccxOpenState,globalThis.__ccxTitleMatches)` +
+            `:${sorted})`,
         where: 'replace',
     },
     {
@@ -256,11 +271,34 @@ const PATCHES = [
             `(globalThis.__ccxSearchCandidates||[]).map((s)=>s.sessionId.value))},placeholder:"Search sessions…"`,
         where: 'replace',
     },
+    {
+        // The call that splits the sorted list into sections — groups, ungrouped, archived — and the last
+        // of those is rendered last no matter what #9 did with the order. An archived session found by
+        // its NAME therefore sat under the "Archived sessions" fold, below every transcript hit, which is
+        // the one place a user who just typed that name is not looking. The fourth argument is the
+        // is-archived predicate this one call partitions by, so it is wrapped here — and only here: every
+        // other read of it (the Archive/Unarchive control, the drag rules, the group counts) is the app's
+        // own and untouched, so a lifted row still behaves like the archived session it is.
+        //
+        // The wrapper is the page's, for the same reason the sort is: the rule lives in one readable
+        // place rather than in a string this file assembles. Without a query the page hands the original
+        // predicate straight back, identity included, so a query-less render partitions exactly as stock.
+        //
+        // The grouping call takes `F1?N:[]` — the app already disables grouping while a query is typed —
+        // so a lifted row lands in `ungrouped`, which is the block the sort ordered.
+        file: 'webview/index.js',
+        find: /([\w$]+)=([\w$]+)&&!([\w$]+),([\w$]+)=([\w$]+)\(\1\?([\w$]+):\[\],([\w$]+),([\w$]+),([\w$]+)\)/,
+        replace: (_found, grouping, groupsOn, query, result, groupFn, groups, list, idOf, isArchived) =>
+            `${grouping}=${groupsOn}&&!${query},${result}=${groupFn}(${grouping}?${groups}:[],${list},${idOf},` +
+            `globalThis.__ccx&&globalThis.__ccx.archivedFilter` +
+            `?globalThis.__ccx.archivedFilter(${isArchived},globalThis.__ccxTitleMatches):${isArchived})`,
+        where: 'replace',
+    },
     // --- History before compaction (five hooks, all inert while the switch is off) ---------------
     //
     // The transcript the page opens is rebuilt by extension.js, and the bundle carries that code twice:
     // once for the default projects directory and once for a CLAUDE_CONFIG_DIR one. Which copy runs
-    // depends on the machine, so #11 and #12 patch both and expect exactly two hits each.
+    // depends on the machine, so #12 and #13 patch both and expect exactly two hits each.
     {
         // The walk that turns transcript lines into the conversation. It indexes every line by uuid,
         // relinks each compaction's kept tail, then follows parentUuid back from the newest message —

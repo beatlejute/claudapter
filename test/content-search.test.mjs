@@ -210,12 +210,101 @@ assert.equal(setterCalls.length, 1, 'the current query answer must still go thro
 
 console.log('OK — the page debounces content search and never applies a stale answer');
 
+// --- Part 2b: name hits above transcript hits -------------------------------------------------
+//
+// Both kinds of row come back from the same filter, so the list arrives in the app's own recency
+// order with the two kinds interleaved. A user who typed a name means the name: those rows go first,
+// and the transcript-only ones keep their own order underneath. The set of ids whose name matched is
+// what the filter records (injection point #7) and what the sort is handed as its fourth argument.
+const row = (id, state) => ({
+    sessionId: { value: id },
+    busy: { value: state === 'running' },
+    pendingInput: { value: state === 'waiting' },
+});
+const N1 = row('11111111-1111-4222-8333-444444444444', 'idle');
+const C1 = row('22222222-1111-4222-8333-444444444444', 'idle');
+const N2 = row('33333333-1111-4222-8333-444444444444', 'idle');
+const C2 = row('44444444-1111-4222-8333-444444444444', 'idle');
+const byName = new Set([N1.sessionId.value, N2.sessionId.value]);
+
+// 8. Interleaved, the two kinds separate into blocks and neither block is reordered inside itself.
+assert.deepEqual(
+    ccx.pinSort([C1, N1, C2, N2], null, undefined, byName),
+    [N1, N2, C1, C2],
+    'a row found by its name must rank above one found only in its transcript',
+);
+
+// 9. Without a query the fourth argument is null, and the order is the one pins and liveness give —
+//    the same array back, since nothing had to move.
+const untouched = [C1, N1, C2, N2];
+assert.strictEqual(
+    ccx.pinSort(untouched, null, undefined, null),
+    untouched,
+    'no query means no name/content split',
+);
+
+// 10. Liveness still orders each block: a running transcript hit stays under every name hit, and a
+//     running name hit floats over the idle ones.
+const NR = row('55555555-1111-4222-8333-444444444444', 'running');
+const CR = row('66666666-1111-4222-8333-444444444444', 'running');
+assert.deepEqual(
+    ccx.pinSort([C1, N1, CR, NR], null, undefined, new Set([N1.sessionId.value, NR.sessionId.value])),
+    [NR, N1, CR, C1],
+    'each block must order by liveness on its own',
+);
+
+// 11. A pin is the one order the user set by hand, so it outranks both halves of the search — a
+//     pinned transcript hit still comes first.
+fromHost({ type: 'ccx:state', pinnedSessions: [C1.sessionId.value] });
+fireTimers((t) => t.ms === 0);
+const pinned = new Set([C1.sessionId.value]);
+assert.deepEqual(
+    ccx.pinSort([N1, C1, C2], pinned, undefined, byName),
+    [C1, N1, C2],
+    'a pin must outrank the name/content split',
+);
+
+// 12. The archived fold: the app builds it after the sort and renders it last, so a name hit that
+//     happens to be archived would sit under every transcript hit. Under a query those rows report as
+//     not archived for the one call that partitions the list, and land in the main block instead.
+assert.ok(typeof ccx.archivedFilter === 'function', 'page did not expose archivedFilter');
+const A1 = row('77777777-1111-4222-8333-444444444444', 'idle'); // archived, matched by name
+const A2 = row('88888888-1111-4222-8333-444444444444', 'idle'); // archived, matched by transcript
+const isArchived = (s) => s === A1 || s === A2;
+const lifted = ccx.archivedFilter(isArchived, new Set([N1.sessionId.value, A1.sessionId.value]));
+assert.equal(lifted(A1), false, 'an archived session found by name must leave the archived fold');
+assert.equal(lifted(A2), true, 'an archived session found only in its transcript must stay in the fold');
+assert.equal(lifted(N1), false, 'a row that was never archived is unaffected');
+
+// 13. Without a query — and for an empty result — the app's own predicate is handed straight back,
+//     identity included, so a query-less render partitions exactly as stock.
+assert.strictEqual(ccx.archivedFilter(isArchived, null), isArchived, 'no query must not wrap anything');
+assert.strictEqual(ccx.archivedFilter(isArchived, new Set()), isArchived, 'an empty set must not wrap anything');
+
+console.log('OK — search results lead with the name matches');
+
 // --- Part 3: the wiring itself — the patcher must expose what the page relies on, and vice versa ----
 
 const patcher = readFileSync(new URL('../scripts/apply-patch.mjs', import.meta.url), 'utf8');
 assert.ok(/onSearchState\(ccxSetContentMatches\)/.test(patcher), 'the state hook must be handed to onSearchState');
 assert.ok(/onSearchQuery\(\$\{param\}\.target\.value/.test(patcher), 'the search input must forward every keystroke');
 assert.ok(/globalThis\.__ccxSearchCandidates/.test(patcher), 'the candidate id list must be exposed for the onChange hook');
+assert.ok(
+    /globalThis\.__ccxTitleMatches=\$\{query\}\?new Set\(\):null/.test(patcher),
+    'the name matches must be collected fresh on every render, and cleared without a query',
+);
+assert.ok(
+    /globalThis\.__ccxTitleMatches\.add\(\$\{item\}\.sessionId\.value\)/.test(patcher),
+    'the filter must record every id whose own name matched',
+);
+assert.ok(
+    /pinSort\([^)]*globalThis\.__ccxTitleMatches\)/.test(patcher),
+    'the sort must be handed the name matches',
+);
+assert.ok(
+    /archivedFilter\(\$\{isArchived\},globalThis\.__ccxTitleMatches\)/.test(patcher),
+    'the archived partition must go through archivedFilter, carrying the name matches',
+);
 const page = readFileSync(new URL('../src/webview.js', import.meta.url), 'utf8');
 assert.ok(/onSearchState: onSearchState/.test(page) && /onSearchQuery: onSearchQuery/.test(page), 'window.__ccx must expose both hooks');
 const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');

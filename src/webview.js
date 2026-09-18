@@ -625,11 +625,12 @@
         setTimeout(pushPinned, 0);
     }
 
-    // A stable partition, not a comparator: rows fall into three blocks — pinned, running, and the
-    // rest — and keep the list's own recency order inside each one, so neither a pin nor a turn
-    // starting ever reorders anything else.
+    // A stable partition, not a comparator: rows fall into blocks — pinned, running, the rest, and
+    // under a query the last two again for rows that matched by transcript — and keep the list's own
+    // recency order inside each one, so neither a pin, nor a turn starting, nor a search ever
+    // reorders anything else.
     //
-    // Four blocks, and the middle two are the row's own status dot: the third argument is the
+    // The middle blocks are the row's own status dot: the third argument is the
     // component's accessor for it (openState — "waiting" / "running" / "idle" / "unread", and nothing
     // at all for a session that is neither open in a tab nor holding unread output), the same function
     // that decides whether the dot is drawn green, grey, or not drawn. Sorting by the dot rather than
@@ -647,34 +648,75 @@
     // The second argument is what the component last received. Before the first push it is null and
     // the page's own copy stands in — it is authoritative either way, and the two only differ for
     // the one render between a toggle and the state write landing.
-    function pinSort(list, fromState, openState) {
+    //
+    // The fourth is the search half: under a query a row is on screen for one of two reasons — its
+    // own name (or branch) matched, or the transcript did — and the one the user typed a name for
+    // should not sit under a row that merely said the word once. The ids whose name matched are
+    // collected by the filter itself (injection point #7), so this only has to read the set. Without
+    // a query it is null and every row counts as a name match, which is the ordering as it was.
+    function pinSort(list, fromState, openState, titleMatches) {
         try {
             var pins = fromState && typeof fromState.has === 'function' ? fromState : pinnedIds;
+            var titles = titleMatches && typeof titleMatches.has === 'function' ? titleMatches : null;
             if (!list || !list.length) return list;
-            var blocks = [[], [], [], []];
+            var blocks = [[], [], [], [], [], [], []];
             var highest = 0;
             var moved = false;
             for (var i = 0; i < list.length; i++) {
                 var session = list[i];
-                var rank = sessionRank(session, pins, openState);
+                var rank = sessionRank(session, pins, openState, titles);
                 if (rank < highest) moved = true;
                 else highest = rank;
                 blocks[rank].push(session);
             }
             // A list already in block order is handed back untouched: a fresh array would be a new
             // identity for nothing, and this one is what the component memoises against.
-            return moved ? blocks[0].concat(blocks[1], blocks[2], blocks[3]) : list;
+            if (!moved) return list;
+            var out = [];
+            for (var b = 0; b < blocks.length; b++) out = out.concat(blocks[b]);
+            return out;
         } catch (e) {
             /* an unrecognised list is an unsorted list, not a broken history panel */
             return list;
         }
     }
 
-    // 0 pinned, 1 running a turn or waiting for input, 2 open in a tab but idle or holding unread
-    // output, 3 neither.
-    function sessionRank(session, pins, openState) {
+    // 0 pinned, then one block per liveness rank — 1 running a turn or waiting for input, 2 open in a
+    // tab but idle or holding unread output, 3 neither — and, under a query, the same three again at
+    // 4/5/6 for the rows that matched by transcript rather than by name. A pin still outranks both:
+    // it is the one ordering the user set by hand, and a search that hides it does so by filtering the
+    // row out, not by sinking it.
+    function sessionRank(session, pins, openState, titles) {
         var id = session && session.sessionId && session.sessionId.value;
         if (id && pins && pins.size && pins.has(id)) return 0;
+        var live = livenessRank(session, openState);
+        return titles && !(id && titles.has(id)) ? live + 3 : live;
+    }
+
+    // Archived sessions are the app's own section, built after the sort and rendered last whatever the
+    // sort did — so a search that found an archived session BY NAME could never show it where the user
+    // is looking: the row sat under the "Archived sessions" fold below every transcript hit. Under a
+    // query the archived rows whose name matched are therefore reported as not archived, for the one
+    // call that partitions the list (injection point #11) and nowhere else. They land in the main block
+    // among the other name hits, in the order the sort already put them.
+    //
+    // Only the name hits are lifted. A query that merely occurs in an archived transcript is why the
+    // section exists — archiving is how a session is put out of the way, and emptying the fold of
+    // everything a query touches would undo that.
+    //
+    // Every other read of the predicate is the app's own: the row still offers Unarchive rather than
+    // Archive, and the group/drag rules are unchanged, because those call the real one.
+    function archivedFilter(isArchived, titleMatches) {
+        if (typeof isArchived !== 'function') return isArchived;
+        if (!titleMatches || typeof titleMatches.has !== 'function' || !titleMatches.size) return isArchived;
+        return function (session) {
+            if (!isArchived(session)) return false;
+            var id = session && session.sessionId && session.sessionId.value;
+            return !(id && titleMatches.has(id));
+        };
+    }
+
+    function livenessRank(session, openState) {
         var dot = null;
         if (typeof openState === 'function') {
             try {
@@ -2930,6 +2972,7 @@
         onSearchQuery: onSearchQuery,
         onPinState: onPinState,
         pinSort: pinSort,
+        archivedFilter: archivedFilter,
         retract: retractLastMessage,
         keepEveryMessage: keepEveryMessage,
         beforeCompaction: beforeCompaction,

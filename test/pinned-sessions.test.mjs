@@ -403,8 +403,8 @@ assert.ok(
     'the open-state accessor must be handed over from its own injection point',
 );
 assert.ok(
-    /pinSort\(\$\{\w+\},ccxPinnedIds,globalThis\.__ccxOpenState\)/.test(patcher),
-    'the rendered list must go through pinSort, carrying the openState accessor',
+    /pinSort\(\$\{\w+\},ccxPinnedIds,globalThis\.__ccxOpenState,globalThis\.__ccxTitleMatches\)/.test(patcher),
+    'the rendered list must go through pinSort, carrying the openState accessor and the name matches',
 );
 assert.ok(
     /,ccxPinSorted=\(\$\{sorted\}=globalThis/.test(patcher),

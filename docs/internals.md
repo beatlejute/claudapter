@@ -331,7 +331,7 @@ page never reads the session off the context object.
 
 ### Content search reuses the session-list handoff — and needs `$` in its identifier class
 
-Points #6–#10 sit in the same session-list component as #4, and exist for the same reason: the row
+Points #6–#11 sit in the same session-list component as #4, and exist for the same reason: the row
 array and the title filter are local to that component, so anything wanting to widen the filter has
 to be injected right where they already live, not called in from outside.
 
@@ -339,7 +339,7 @@ to be injected right where they already live, not called in from outside.
 matches zero times here and nowhere else in the 4.7 MB bundle, which is a quiet way to fail: no
 error, just a signature that happens to sit at hit-count 0 instead of 1 and gets caught by
 `apply-patch.mjs`’s count check rather than by the regex itself. `[\w$]+` is what every capture group
-in points #6–#10 uses instead.
+in points #6–#11 uses instead.
 
 Point #6 is the state declaration, anchored on the query state, the rename-target state and the per-row
 ref map — three declarations that used to be adjacent and, since 2.1.259, are not:
@@ -394,6 +394,23 @@ with a concise arrow body — so the hoisted local is the signature's *first* ca
 declared inside the match, and the rewritten predicate has to stay an expression. A `{…}` body without
 a `return` would have filtered every row out while matching perfectly and passing the syntax check.
 
+The rewritten predicate also decides which of the two kinds of hit a row is, because this is the only
+place the name half is ever evaluated. Written out of the minifier's names, it becomes:
+
+```js
+V1=u.toLowerCase(),E1=(globalThis.__ccxSearchCandidates=q4,globalThis.__ccxTitleMatches=u?new Set():null,
+u?q4.filter((X1)=>(JL(X1).toLowerCase().includes(V1)||(X1.gitBranch.value?.toLowerCase().includes(V1)??!1))
+?(globalThis.__ccxTitleMatches.add(X1.sessionId.value),!0)
+:(ccxContentMatches?ccxContentMatches.has(X1.sessionId.value):!1)):q4)
+```
+
+A ternary rather than the `||` chain it replaced: the row is kept either way, but only the name branch
+records the id. Point #9 reads that set and ranks the name hits above the transcript-only ones. The set
+is rebuilt on every render — the expression rides the component's own `let` chain, and a set left over
+from an earlier query would rank rows by a word no longer in the box — and a query-less render assigns
+`null`, which is the sort's signal that there is nothing to rank by. Both points sit in the same chain
+with the filter first, so the set is always the current render's when the sort reads it.
+
 Points #8 and #9 are the sort, split in two by 2.1.259; both are described in the next section.
 
 Point #10 is the search input’s `onChange`, anchored on the literal `placeholder:"Search sessions…"`
@@ -421,6 +438,32 @@ it — the query sits in the encoded message content either way, and parsing eve
 the structure away would buy nothing — and caches the lowercased text per session on file mtime, so a
 session unchanged since the last keystroke costs nothing to check again.
 
+Point #11 is the one place ordering alone could not reach: the archived fold. The list the sort
+produces is not rendered as one run of rows — a grouping call splits it into sections and the page
+emits them in a fixed order, `[...grouped, ...ungrouped, ...archived]`, so the archived block is last
+whatever rank the sort gave its rows. An archived session matched by name therefore sat under the
+*Archived sessions* header, below every transcript hit:
+
+```js
+([\w$]+)=([\w$]+)&&!([\w$]+),([\w$]+)=([\w$]+)\(\1\?([\w$]+):\[\],([\w$]+),([\w$]+),([\w$]+)\)
+```
+
+That matches `F1=y1&&!u,R0=mR1(F1?N:[],h0,i8,EZ)` — the grouping flag (already `&&!query`, because the
+app turns groups off while a query is typed), the sorted list, the id accessor, and the is-archived
+predicate the partition runs on. Only that last argument is rewritten, into
+`globalThis.__ccx.archivedFilter(EZ, globalThis.__ccxTitleMatches)`: a predicate that answers `false`
+for an archived row whose id is in the name-match set, so the row lands in `ungrouped` — the block the
+sort just ordered — and `true` for everything else. Content-only archived hits stay in the fold; the
+section is how a session is kept out of the way, and emptying it of everything a query touches would
+undo that.
+
+Wrapping the argument rather than the predicate is the whole trick. `EZ` — three characters, and all it
+does is `return $.archived.value` — is read at fourteen other call sites in this component: the Archive
+and Unarchive controls, the drag rules, the status filter, the group tallies, and the two id lists
+range-selection works over. Every one of them still calls the app's own, so a lifted row is archived in
+every respect except which list it is drawn in. Without a query the page hands `EZ` straight back, identity included, and the
+partition is byte-for-byte the stock one.
+
 ### Pinning is a sort, not a DOM move
 
 The row a pin acts on is not the page's to keep. The session list is re-derived from the app's own
@@ -428,10 +471,12 @@ array on every render, and the array is ordered by recency — move the node and
 it back. So pinning is point #9: a sort spliced into the same `let` chain the list is built in, run
 before the component ever maps it to rows — with point #8 handing it the accessor it ranks by.
 
-The sort is a stable partition into four blocks rather than a comparator: pinned ids, then the
-sessions running a turn or waiting for input, then the ones open in a tab but idle, then the rest —
-each block keeping the order it arrived in, so neither a pin nor a turn starting reorders anything
-around it. The block a row lands in is its own status dot, read through the component's `openState`
+The sort is a stable partition into blocks rather than a comparator: pinned ids, then the sessions
+running a turn or waiting for input, then the ones open in a tab but idle, then the rest — each block
+keeping the order it arrived in, so neither a pin nor a turn starting reorders anything around it.
+Under a query those last three ranks appear twice, once for the rows whose own name matched and once
+for the rows found only in a transcript (see below). The block a row lands in is its own status dot,
+read through the component's `openState`
 accessor, which answers `"waiting"` / `"running"` / `"idle"` / `"unread"`, or nothing at all for a
 session that is neither open nor holding unread output. Idle and closed are indistinguishable without
 it — both have `busy === false` — which is the whole reason the signature reaches for it.
@@ -461,7 +506,7 @@ be declared immediately before the accessor:
 Two adjacent declarations instead of a 700-byte span, appended to rather than rewritten, and #7 goes
 back to being only about the filter. The stock partition is a coarser version of the same idea — open
 first, everything else after, no pins and no running/idle distinction — so pinSort re-blocks its
-output into all four ranks and the two compose rather than fight.
+output into all its own ranks and the two compose rather than fight.
 
 2.1.259 undid the adjacency. The accessor moved to *above* the memo — the component now derives its
 status-filter counts from it, so it has to exist first — with the search filter (#7) between the two.
@@ -472,7 +517,7 @@ overlap cannot both be applied to the same source. So the pair became two points
 // #8, anchored on a property name rather than a local — the steadiest anchor in the component
 ccxOpenStateHandoff=(globalThis.__ccxOpenState=T6),r1=z0((b1)=>({openState:T6(b1),remoteStatus:…
 // #9, ~600 bytes later, appended to the memo it reassigns
-…,y2=S2(()=>{…},[Q2,Q4,y4]),ccxPinSorted=(y2=globalThis.__ccx.pinSort(y2,ccxPinnedIds,globalThis.__ccxOpenState))
+…,y2=S2(()=>{…},[Q2,Q4,y4]),ccxPinSorted=(y2=globalThis.__ccx.pinSort(y2,ccxPinnedIds,globalThis.__ccxOpenState,globalThis.__ccxTitleMatches))
 ```
 
 The handoff rides the same `let` chain, so it re-runs on every render and a `useCallback` identity
@@ -485,6 +530,14 @@ input, are working, or are unread") and a **Filter by status** multi-select over
 with pinning the way search already does — with the same consequence: a pinned session the stock
 filter excludes is not shown at all. A pin is a position, not an exemption, and now there are two
 ways to filter it off the screen.
+
+The fourth argument is the search half, and it is why the filter records the ids it matched by name.
+Both kinds of hit come back from the same `filter`, interleaved in the app's recency order, and a
+session that merely said the word once should not sit above the one whose name the user typed. So the
+liveness ranks are emitted twice — name hits first, transcript-only hits after — while the pin block
+stays on top of both, since that is the one position a user set by hand and a search that should hide
+it filters the row out rather than sinking it. Without a query the set is `null` and every row counts
+as a name hit, which is the ordering as it was before.
 
 A list already in block order is returned as the same array, so a render that needs no move allocates
 nothing, and an accessor that throws (or is missing, on an older patcher) drops the sort back to the
@@ -834,7 +887,7 @@ anchor`, each next one onto the previous), then moves every other child of the s
 uuid. And `logicalParentUuid` **is** that last kept uuid. Joining the boundary to it builds
 `tail → … → head → summary → boundary → tail`, and the walk's loop guard (`if (seen.has(uuid)) break`)
 stops right there. Nothing crashes, and no older history appears either. The boundary has to be joined to
-`uuids[0]`'s parent as read from disk, before the relink rewrites it, which is why injection point #11
+`uuids[0]`'s parent as read from disk, before the relink rewrites it, which is why injection point #12
 sits between the index and the relink.
 
 The relink also has a precondition the stitch mirrors: a `preservedMessages` whose uuids are not all in the
@@ -845,13 +898,13 @@ original place and `logicalParentUuid` is the correct join after all.
 `CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP` is set. It is scanned for the last boundary and only
 `postBoundaryBuf` is returned, so the earlier uuids never reach the map and there is nothing to join to. That
 variable cannot simply be set in the extension host: `envFor` passes the host's environment on to every CLI
-it spawns. Injection point #12 adds the switch to the condition instead.
+it spawns. Injection point #13 adds the switch to the condition instead.
 
 **The page.** Even a complete list gets trimmed on arrival. `vE1(messages, opts)` returns everything up to
 `600` messages and otherwise removes messages until `500` remain. Tool-only turns go first (the recent 100
 are protected on the live path), then the oldest. There is no list virtualisation behind it, so the cap is
 the page's only defence against a long transcript. It is applied both in `loadFromServer` and while a tab is
-live. Injection point #13 lifts it while the switch is on.
+live. Injection point #14 lifts it while the switch is on.
 
 The summary itself loses its flag on the way into the page. The SDK message carries `isCompactSummary`,
 but the page's message class (`OT` → `new TZ(...)`) copies neither that nor `is_meta`, and loaded history

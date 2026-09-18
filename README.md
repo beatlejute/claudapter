@@ -404,17 +404,18 @@ VS Code extension host                     webview (UI)
 | 4 | `webview/index.js` | *structural* — the three reads before `registerAction({id:"model"` | their command registry, jsx factory **and the session object** |
 | 5 | `webview/index.js` | `["model","effort-level",…]` | ordering of the *Model* section |
 | 6 | `webview/index.js` | *structural* — the session list's `[query,setQuery]=ne(""),[renaming,…]=ne(null),refs=ge(new Map)` | two more state pairs — content-search results and pinned ids — and hands both setters over |
-| 7 | `webview/index.js` | *structural* — the title/branch filter expression that follows it | ORs in a content match and exposes the unfiltered row list globally |
+| 7 | `webview/index.js` | *structural* — the title/branch filter expression that follows it | ORs in a content match, records which rows matched by name, exposes the unfiltered row list globally |
 | 8 | `webview/index.js` | *structural* — the `openState` accessor, above the memo that sorts by it | hands that accessor to the page on `globalThis` |
-| 9 | `webview/index.js` | *structural* — the open-first memo itself | orders the list the app renders: pinned, running, open, closed |
+| 9 | `webview/index.js` | *structural* — the open-first memo itself | orders the list the app renders: pinned, then name matches, then content matches, each by running / open / closed |
 | 10 | `webview/index.js` | `onChange:(e)=>{…},placeholder:"Search sessions…"` | forwards every keystroke to the host-side transcript search |
-| 11 | `extension.js` ×2 | *structural* — the transcript walk, between its uuid index and the relink of the kept tail | joins each `compact_boundary` back to the conversation it closed |
-| 12 | `extension.js` ×2 | `if(size>limit&&!env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP)` in the transcript reader | reads a large transcript whole instead of from its last boundary |
-| 13 | `webview/index.js` | *structural* — the cap function, `if(list.length<=600)return{messages:list,…}` | lifts the 600/500 message cap |
-| 14 | `webview/index.js` | *structural* — the message-action menu, after its `sessionId` guard | no fork/rewind menu above the last compaction |
-| 15 | `webview/index.js` | *structural* — the *Rewind* list's prompt filter | leaves prompts above the last compaction out of that list |
+| 11 | `webview/index.js` | *structural* — the grouping call that splits the sorted list into sections | under a query, lifts an archived row that matched **by name** out of the archived fold |
+| 12 | `extension.js` ×2 | *structural* — the transcript walk, between its uuid index and the relink of the kept tail | joins each `compact_boundary` back to the conversation it closed |
+| 13 | `extension.js` ×2 | `if(size>limit&&!env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP)` in the transcript reader | reads a large transcript whole instead of from its last boundary |
+| 14 | `webview/index.js` | *structural* — the cap function, `if(list.length<=600)return{messages:list,…}` | lifts the 600/500 message cap |
+| 15 | `webview/index.js` | *structural* — the message-action menu, after its `sessionId` guard | no fork/rewind menu above the last compaction |
+| 16 | `webview/index.js` | *structural* — the *Rewind* list's prompt filter | leaves prompts above the last compaction out of that list |
 
-\#11–#15 do nothing while *History before compaction* is off. The walk and the reader exist twice in
+\#12–#16 do nothing while *History before compaction* is off. The walk and the reader exist twice in
 `extension.js`, once for the default projects directory and once for a `CLAUDE_CONFIG_DIR` one, so both
 anchors must match exactly twice.
 
@@ -602,6 +603,20 @@ on disk and reports back which ones actually contain it — no JSON parsing, the
 encoded message text either way. The two passes merge: a row shows up if it matches on title, branch,
 **or** content.
 
+The two kinds of hit are not worth the same, so they are not shown as one list. A row whose own name
+(or branch) matched comes first; the ones found only inside a transcript follow underneath. Someone
+who typed a name meant the name, and a session that merely said the word once should not sit above
+it. Inside each half the usual order holds — running, open, closed, by recency — and a pin still
+outranks both, since that is the one position the user set by hand.
+
+Archived sessions are the exception the ordering alone could not reach. The app builds its *Archived
+sessions* fold after the sort and renders it last, so an archived row that matched by name sat below
+every transcript hit — the one place someone who just typed that name is not looking. Under a query
+those rows are lifted into the main list and take their place among the other name hits; the ones
+found only inside an archived transcript stay in the fold, because keeping a session out of the way is
+what archiving is for. A lifted row is still archived in every other respect — it offers *Unarchive*,
+not *Archive* — and with no query the split is the app's own, untouched.
+
 It stays out of the hot path deliberately. Typing is debounced 250ms before anything is sent, every
 new keystroke clears the previous result immediately so a stale match never lingers under a new query,
 and each session's transcript text is cached on disk mtime so re-searching an unchanged session costs
@@ -625,7 +640,7 @@ orders by.
 
 2.1.257 also began doing a coarse version of this itself: the list the app renders is now a memo that
 puts open sessions in front of the rest, with no pins and no running/idle distinction. The sort runs
-on that memo's result and re-blocks it into all four ranks, so the two compose rather than fight.
+on that memo's result and re-blocks it into all its own ranks, so the two compose rather than fight.
 
 2.1.259 moved the accessor the sort reads to *above* that memo, with the search filter in between, so
 the two halves are separate injection points now: #8 hands the accessor over on `globalThis` and #9
@@ -640,6 +655,12 @@ Search and pinning compose in the only way that makes sense: the sort runs on wh
 filter. With an empty query that is every session, so the pins sit at the very top; with a query it is
 the matching ones, so a pinned session that does not match is not shown — a pin is a position, not an
 exemption.
+
+A query adds one more split to the same sort: below the pins the name matches are ranked as a block
+above the transcript-only ones, each block still ordered running / open / closed. The filter is what
+tells them apart — it is the only place the name half is evaluated — so it records the ids it matched
+by name and the sort reads that set. Without a query the set is null and the order is pins and
+liveness alone, exactly as it was.
 
 Ordering has to reach the component as state or nothing re-renders when a pin is toggled, which is why
 injection point #6 declares a state pair for it and hands the setter to the page. The page stays the
