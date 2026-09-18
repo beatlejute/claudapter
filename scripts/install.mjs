@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Installs the runtime into ~/.claude/claudapter and applies the hooks to the installed extension.
-import { copyFileSync, mkdirSync, readdirSync, existsSync, statSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readdirSync, existsSync, statSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -56,10 +56,33 @@ if (existsSync(mcpSrc)) console.log(`runtime: ${copyDir(mcpSrc, path.join(RUNTIM
 // and the only useful thing left is to say whether the fix is already published. See the upstream check
 // in apply-patch.mjs — nothing is ever downloaded from it, only a version number read.
 const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-const stamp = { version: pkg.version, repository: pkg.repository?.url || pkg.repository || null };
+// repoPath rides along on every install, not only when self-update is armed: the toggle in the command
+// menu has to know which clone it would arm before anything is armed at all.
+const stamp = {
+    version: pkg.version,
+    repository: pkg.repository?.url || pkg.repository || null,
+    repoPath: ROOT,
+};
 copyFileSync(path.join(ROOT, 'scripts', 'apply-patch.mjs'), path.join(RUNTIME, 'apply-patch.mjs'));
 writeFileSync(path.join(RUNTIME, 'patch-version.json'), `${JSON.stringify(stamp, null, 4)}\n`, 'utf8');
 console.log(`runtime: apply-patch.mjs (${pkg.version})`);
+
+// Arming self-update is its own deliberate act, which is why it lives in a file of its own rather than
+// in the stamp above: the stamp is rewritten on every install, so a switch kept there would be flipped
+// back and forth by routine setups. This one is only ever written by --self-update and only ever
+// removed by --no-self-update, so an ordinary `npm run setup` leaves whatever was chosen alone.
+const SELF_UPDATE_FILE = path.join(RUNTIME, 'self-update.json');
+if (process.argv.includes('--self-update')) {
+    const armed = { enabled: true, repoPath: ROOT, armedAt: new Date().toISOString() };
+    writeFileSync(SELF_UPDATE_FILE, `${JSON.stringify(armed, null, 4)}\n`, 'utf8');
+    console.log(`runtime: self-update ARMED — this clone (${ROOT}) will be pulled and re-installed`);
+    console.log('         when a Claude Code update breaks the patch and a release that fits is published.');
+} else if (process.argv.includes('--no-self-update') && existsSync(SELF_UPDATE_FILE)) {
+    rmSync(SELF_UPDATE_FILE, { force: true });
+    console.log('runtime: self-update disarmed');
+} else if (existsSync(SELF_UPDATE_FILE)) {
+    console.log('runtime: self-update is armed (npm run setup:manual turns it off)');
+}
 
 // Template profiles are only added when missing — existing keys are never overwritten
 const templates = path.join(ROOT, 'templates', 'profiles');

@@ -76,6 +76,8 @@ It also installs the **keeper**, a small companion extension that re-applies the
 | Command | Action |
 |---|---|
 | `npm run setup` | install runtime + apply patch + install the keeper |
+| `npm run setup:auto` | the same, and arm [self-update](#self-update) — updates then need nothing from you |
+| `npm run setup:manual` | the same, and disarm self-update |
 | `npm run status` | show whether the files are patched |
 | `npm run revert` | restore the extension from backup |
 | `npm run apply` | patch only (runtime already installed) |
@@ -718,7 +720,7 @@ The second row is the honest gap: a matching signature is not a promise that the
 
 ### Is the fix already published?
 
-The patcher that runs unattended is a **frozen copy**. `install.mjs` puts it in `~/.claude/claudapter/` and nothing ever refreshes it — that is deliberate: pulling code over the network at the moment it is about to write into somebody else's bundle would be an entirely different thing to trust. So rows two and three above cannot heal themselves. Updating the signatures is `git pull && node scripts/install.mjs`, by hand, always.
+The patcher that runs unattended is a **frozen copy**. `install.mjs` puts it in `~/.claude/claudapter/` and nothing ever refreshes it — that is deliberate: pulling code over the network at the moment it is about to write into somebody else's bundle is an entirely different thing to trust. So by default rows two and three above cannot heal themselves, and updating the signatures is `git pull && node scripts/install.mjs`, by hand. [Self-update](#self-update) below is the opt-in that removes that step.
 
 What the frozen copy *can* do is tell you whether that pull is worth making. On those two rows only, it reads one published `package.json`:
 
@@ -737,6 +739,36 @@ GET https://raw.githubusercontent.com/<owner>/<repo>/main/package.json
 The quiet path — the one that runs on **every window** and finds the bundle already patched — never touches the network. Neither does anything else: the check fires only when a patch failed or went onto a version this copy does not know, which is at most once per Claude Code update. Any failure (offline, proxy, rate limit) is silent and the plain message is shown instead.
 
 To turn it off entirely: `--no-upstream-check` on the patcher, or `CCX_NO_UPSTREAM_CHECK=1` in the environment. `CCX_UPSTREAM_URL` points it at a fork or mirror instead.
+
+### Self-update
+
+Knowing the fix exists and then being told to go and fetch it is not automation. Armed, Claudapter takes it:
+
+```bash
+npm run setup:auto      # install, and arm self-update
+npm run setup:manual    # install, and disarm it
+```
+
+or flip **Update Claudapter by itself** in the *Model* section of the command menu, beside *Thinking* and *History before compaction*. The row names the clone it would pull, and it only appears once an install has recorded one.
+
+After that, a Claude Code update that breaks the patch and has a published fix is handled end to end — `git fetch`, fast-forward, re-run *this clone's* installer — and the only thing you see is *Claude Code 2.1.276 broke the patch, so Claudapter updated itself and re-applied it* with a **Reload Window** button.
+
+**Nothing is downloaded by Claudapter itself.** Git fast-forwards the clone you already have, and the code that ends up patching is the code that was reviewed there — the same `install.mjs` you ran by hand, out of the same repository, on the branch you checked out.
+
+It is off until you arm it, and arming is its own act. It lives in `~/.claude/claudapter/self-update.json`, written **only** by `--self-update` and removed **only** by `--no-self-update`, so a routine `npm run setup` never flips it either way. Background code that pulls and runs is something to agree to once, knowingly — not something that arrives with a bug fix.
+
+The guards matter more than the feature, and each one stops the whole thing and says so by name:
+
+| Refusal | Why |
+|---|---|
+| `dirty` | the clone has uncommitted changes — an afternoon's work is never worth risking to a background version check |
+| `no-upstream` | detached, or on a branch nothing publishes: there is nothing to fast-forward onto |
+| `pull-failed` | the fast-forward did not apply. **Never** a merge and never a rebase: either the published history already contains yours, or it stops |
+| `no-clone` | the directory it was armed from is gone or is not a git work tree |
+| `install-failed` | the clone was pulled, and the patch still did not go on |
+| `not-armed` | the default — the fix is named, the pull is yours to make |
+
+`CCX_NO_SELF_UPDATE=1` or `--no-self-update` overrides the arming file, so there is always a way back out without touching it.
 
 ### Version branches
 

@@ -39,7 +39,14 @@ function runPatcher(args) {
                 const out = `${stdout || ''}${stderr || ''}`.trim();
                 log(`${args.join(' ')} → ${error ? 'FAILED' : 'ok'}\n${out}`);
                 if (error) return resolve({ ok: false, out });
-                resolve({ ok: true, out, patched: /^ccx-result: patched$/m.test(out) });
+                resolve({
+                    ok: true,
+                    out,
+                    patched: /^ccx-result: patched$/m.test(out),
+                    // Self-update pulled the clone and the re-run installer patched it — a success this
+                    // call reached only by failing first
+                    healed: (out.match(/^ccx-result: healed (\S+)$/m) || [])[1] || null,
+                });
             },
         );
     });
@@ -60,6 +67,23 @@ function offerReload(message) {
 function upstreamCovers(out) {
     const [, published, standing] = out.match(/^ccx-upstream: (\S+) (\S+)$/m) || [];
     return standing === 'covers' ? published : null;
+}
+
+// Why the published fix did not install itself. `not-armed` is the default state and says what to turn
+// on; the rest are conditions on this machine that a person has to clear, and naming which one is the
+// difference between a notification that can be acted on and one that cannot.
+const HEAL_HINTS = {
+    'not-armed': 'Pull it and re-run "node scripts/install.mjs" — or arm self-update once with "npm run setup:auto".',
+    dirty: 'Self-update stopped: the clone has uncommitted changes. Commit or stash them, then re-run "npm run setup".',
+    'no-clone': 'Self-update could not find the clone it was armed from. Re-run "npm run setup:auto" from it.',
+    'no-upstream': 'Self-update stopped: the clone is not on a branch that tracks a remote.',
+    'pull-failed': 'Self-update could not fast-forward the clone. Pull it by hand and re-run "npm run setup".',
+    'install-failed': 'Self-update pulled the clone, but the patch still did not go on.',
+};
+
+function healHint(out) {
+    const reason = (out.match(/^ccx-heal-blocked: (\S+)$/m) || [])[1];
+    return HEAL_HINTS[reason] || HEAL_HINTS['not-armed'];
 }
 
 function repositoryUrl() {
@@ -97,7 +121,7 @@ function reportFailure(out) {
     const repository = repositoryUrl();
     const message = published
         ? `Claudapter: the patch does not fit Claude Code ${version}, but Claudapter ${published} is ` +
-          'published. Pull it and re-run "node scripts/install.mjs".'
+          `published. ${healHint(out)}`
         : `Claudapter: the patch does not fit Claude Code ${version} — its signatures moved, so it was ` +
           'not applied. Claude Code itself is untouched and working.';
 
@@ -121,6 +145,11 @@ async function sync({ explicit }) {
     const result = await runPatcher(explicit ? [] : ['--if-needed']);
     if (!result.ok) return reportFailure(result.out);
 
+    if (result.healed)
+        return offerReload(
+            `Claudapter: Claude Code ${result.healed} broke the patch, so Claudapter updated itself and ` +
+                're-applied it.',
+        );
     if (explicit) return offerReload(result.patched ? reloadMessage(result.out) : 'Claudapter: patch applied.');
     if (result.patched) offerReload(reloadMessage(result.out));
 }

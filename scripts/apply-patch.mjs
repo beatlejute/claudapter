@@ -387,6 +387,10 @@ const RESULT = {
     unverified: 'ccx-unverified:',
     // Followed by "<published> <covers|behind>" — whether a release exists that knows this extension
     upstream: 'ccx-upstream:',
+    // Followed by "<version>" — the clone was pulled and the patch went on, with nothing asked of anyone
+    healed: 'ccx-result: healed',
+    // Followed by a reason — a published fix exists, and this machine could not take it by itself
+    blocked: 'ccx-heal-blocked:',
 };
 
 function versionOf(dirName) {
@@ -492,6 +496,106 @@ async function upstreamLine(installed) {
         // ask for a version check and is being shown a patch result
         return null;
     }
+}
+
+// --- taking the published fix without asking ------------------------------------------------------
+//
+// Knowing the fix exists and then telling the user to go and fetch it is not automation. Armed, this
+// pulls the clone the installer was last run from and re-runs that installer: the user's own
+// repository, the user's own git, the user's own installer. Nothing is downloaded by this file — git
+// fast-forwards a clone that is already trusted, and the code that ends up patching is the code that
+// was reviewed there.
+//
+// It is off until it is armed, and arming is its own deliberate act — `node scripts/install.mjs
+// --self-update`, which writes self-update.json beside the runtime. An ordinary `npm run setup` never
+// writes that file, so the switch cannot be flipped as a side effect of a routine install. The point of
+// the opt-in is that pulling and running code in the background is a thing to agree to once, knowingly,
+// rather than something that arrives with a bug fix.
+//
+// The guards matter more than the feature. A pull that is not a fast-forward, or one that would touch
+// uncommitted work, is refused and reported: losing an afternoon's work in progress to a background
+// version check would be far worse than one manual `npm run setup`.
+const SELF_UPDATE_FILE = path.join(homedir(), '.claude', 'claudapter', 'self-update.json');
+const GIT_TIMEOUT_MS = 60_000;
+
+function selfUpdateConfig() {
+    try {
+        const json = JSON.parse(readFileSync(SELF_UPDATE_FILE, 'utf8'));
+        return json?.enabled ? json : null;
+    } catch {
+        return null;
+    }
+}
+
+function git(repo, args) {
+    return execFileSync('git', ['-C', repo, ...args], {
+        encoding: 'utf8',
+        timeout: GIT_TIMEOUT_MS,
+        stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+}
+
+// Returns the reason it must not go ahead, or null when it may
+function healBlocker(repo) {
+    if (!repo || !existsSync(path.join(repo, 'scripts', 'install.mjs'))) return 'no-clone';
+    try {
+        if (git(repo, ['rev-parse', '--is-inside-work-tree']) !== 'true') return 'no-clone';
+        // Uncommitted work is somebody's afternoon; a background pull is never worth risking it
+        if (git(repo, ['status', '--porcelain'])) return 'dirty';
+        // Detached, or a branch nobody publishes: there is nothing to fast-forward onto
+        git(repo, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
+    } catch {
+        return 'no-upstream';
+    }
+    return null;
+}
+
+function heal(installed) {
+    const config = selfUpdateConfig();
+    if (!config || process.argv.includes('--no-self-update') || process.env.CCX_NO_SELF_UPDATE) {
+        console.log(`${RESULT.blocked} not-armed`);
+        return false;
+    }
+
+    const repo = config.repoPath;
+    const blocker = healBlocker(repo);
+    if (blocker) {
+        console.log(`${RESULT.blocked} ${blocker}`);
+        return false;
+    }
+
+    try {
+        git(repo, ['fetch', '--quiet']);
+        // Never a merge and never a rebase: either the published history already contains ours, or stop
+        git(repo, ['merge', '--ff-only', '@{upstream}']);
+    } catch (e) {
+        console.log(`${RESULT.blocked} pull-failed`);
+        console.log(`  ${String(e.stderr || e.message).trim().split('\n')[0]}`);
+        return false;
+    }
+
+    // --no-keeper: replacing the extension that is running this very call is churn nobody asked for, and
+    // the keeper carries no signatures. --no-self-update: if the fresh patcher still does not fit, it
+    // must report that rather than start this over.
+    try {
+        const out = execFileSync(
+            process.execPath,
+            [path.join(repo, 'scripts', 'install.mjs'), '--no-keeper', '--no-self-update'],
+            { encoding: 'utf8', timeout: GIT_TIMEOUT_MS, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } },
+        );
+        console.log(out.trim());
+        if (!out.includes(RESULT.patched)) {
+            console.log(`${RESULT.blocked} install-failed`);
+            return false;
+        }
+    } catch (e) {
+        console.log(`${RESULT.blocked} install-failed`);
+        console.log(`  ${String(e.stdout || e.stderr || e.message).trim().split('\n').at(-1)}`);
+        return false;
+    }
+
+    console.log(`${RESULT.healed} ${installed}`);
+    return true;
 }
 
 function backupPath(file) {
@@ -679,10 +783,18 @@ else {
 
     // Outside the lock — a network call is never worth holding a lock across, and the other windows
     // waiting on it have nothing to do with this question
+    let covered = false;
     if (failure || (applied && versions.differs)) {
         const line = await upstreamLine(versions.installed);
         if (line) console.log(line);
+        covered = / covers$/.test(line || '');
     }
+
+    // A published release that fits, and a patch that does not: the one case where there is something
+    // to do rather than something to report. heal() re-runs the installer out of the pulled clone, so a
+    // success here means the extension is patched — by a newer patcher than this one — and the failure
+    // this run started with no longer stands.
+    if (failure && covered && heal(versions.installed)) failure = null;
 
     if (failure) throw failure;
     if (applied) console.log('\nDone. Reload VS Code window (Ctrl+Shift+P → Developer: Reload Window).');

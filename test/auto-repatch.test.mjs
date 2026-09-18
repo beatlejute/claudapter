@@ -219,14 +219,77 @@ try {
         assert.doesNotMatch(quiet.text, /^ccx-upstream:/m, 'an already patched bundle asked about releases');
         console.log('OK — the path that runs on every window never asks about releases');
 
-        // A refused patch is exactly when the answer matters, and it must not swallow the exit code
-        const refusedAndAsked = await runAsync(PATCHER, [`--dir=${moved}`, '--if-needed'], {
+        // --- taking the published fix by itself ---------------------------------------------------
+        // Armed, the frozen copy pulls the clone it was installed from and re-runs that installer. The
+        // guards are the point: a home of its own (USERPROFILE/HOME, so the real arming file is never
+        // read and the real clone is never pulled by a test), a git clone with a real upstream, and a
+        // refusal the moment either is off. Every run from here on covers the fixture's own 9.9.9.
+        published.version = '9.9.9';
+        const home = path.join(WORK, 'home');
+        const armFile = path.join(home, '.claude', 'claudapter', 'self-update.json');
+        mkdirSync(path.dirname(armFile), { recursive: true });
+        const inHome = (extra) => ({
             CCX_NO_UPSTREAM_CHECK: null,
             CCX_UPSTREAM_URL,
+            USERPROFILE: home,
+            HOME: home,
+            ...extra,
         });
+        const arm = (config) => writeFileSync(armFile, JSON.stringify({ enabled: true, ...config }));
+
+        // A refused patch is exactly when the answer matters, and it must not swallow the exit code.
+        // Nothing is armed yet, so the fix is reported and left for a person.
+        const refusedAndAsked = await runAsync(PATCHER, [`--dir=${moved}`, '--if-needed'], inHome());
         assert.notEqual(refusedAndAsked.code, 0, 'the upstream check swallowed a failure');
-        assert.match(refusedAndAsked.text, /^ccx-upstream: /m, 'a refused patch did not ask about releases');
-        console.log('OK — a refused patch reports the published release and still fails');
+        assert.match(refusedAndAsked.text, /^ccx-upstream: 9\.9\.9 covers$/m, 'the covering release was not reported');
+        assert.match(refusedAndAsked.text, /^ccx-heal-blocked: not-armed$/m, 'self-update ran without being armed');
+        console.log('OK — a refused patch reports the published release and, unarmed, still fails');
+
+        // A path that is not a clone at all
+        arm({ repoPath: path.join(WORK, 'nowhere') });
+        const noClone = await runAsync(PATCHER, [`--dir=${moved}`, '--if-needed'], inHome());
+        assert.match(noClone.text, /^ccx-heal-blocked: no-clone$/m, `expected no-clone:\n${noClone.text}`);
+        console.log('OK — self-update refuses a repoPath that is not a clone');
+
+        // A real clone of a real remote, with the installer stubbed: this test is about the
+        // orchestration — pull, then run the installer out of what was pulled — not about the patch
+        const remote = path.join(WORK, 'remote.git');
+        const clone = path.join(WORK, 'clone');
+        const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'ccx', GIT_AUTHOR_EMAIL: 'ccx@test', GIT_COMMITTER_NAME: 'ccx', GIT_COMMITTER_EMAIL: 'ccx@test' };
+        const git = (cwd, ...args) => spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: gitEnv });
+        mkdirSync(remote, { recursive: true });
+        mkdirSync(path.join(clone, 'scripts'), { recursive: true });
+        spawnSync('git', ['init', '--bare', '-b', 'main', remote], { encoding: 'utf8' });
+        spawnSync('git', ['init', '-b', 'main', clone], { encoding: 'utf8' });
+        writeFileSync(path.join(clone, 'scripts', 'install.mjs'), "console.log('ccx-result: patched');\n");
+        git(clone, 'add', '-A');
+        git(clone, 'commit', '-m', 'installer');
+        git(clone, 'remote', 'add', 'origin', remote);
+        git(clone, 'push', '-u', 'origin', 'main');
+
+        // Uncommitted work is somebody's afternoon — it outranks any published fix
+        writeFileSync(path.join(clone, 'scratch.txt'), 'work in progress');
+        arm({ repoPath: clone });
+        const dirty = await runAsync(PATCHER, [`--dir=${moved}`, '--if-needed'], inHome());
+        assert.match(dirty.text, /^ccx-heal-blocked: dirty$/m, `expected dirty:\n${dirty.text}`);
+        assert.equal(readFileSync(path.join(clone, 'scratch.txt'), 'utf8'), 'work in progress', 'the pull touched it');
+        console.log('OK — self-update refuses to pull over uncommitted work, and leaves it alone');
+
+        rmSync(path.join(clone, 'scratch.txt'), { force: true });
+        const healed = await runAsync(PATCHER, [`--dir=${moved}`, '--if-needed'], inHome());
+        assert.equal(healed.code, 0, `a healed run must succeed:\n${healed.text}`);
+        assert.match(
+            healed.text,
+            new RegExp(`^ccx-result: healed ${escape('9.9.9')}$`, 'm'),
+            `the heal was not reported:\n${healed.text}`,
+        );
+        console.log('OK — armed, it pulls the clone, re-runs that installer and reports the heal');
+
+        // The opt-out has to win over the arming file, or there is no way back out
+        const optedOut = await runAsync(PATCHER, [`--dir=${moved}`, '--if-needed'], inHome({ CCX_NO_SELF_UPDATE: '1' }));
+        assert.notEqual(optedOut.code, 0, 'CCX_NO_SELF_UPDATE did not stop the heal');
+        assert.match(optedOut.text, /^ccx-heal-blocked: not-armed$/m, `expected not-armed:\n${optedOut.text}`);
+        console.log('OK — CCX_NO_SELF_UPDATE overrides the arming file');
     } finally {
         upstream.close();
     }
@@ -260,6 +323,8 @@ try {
     assert.match(patcherSrc, /patched: 'ccx-result: patched'/, 'the patcher no longer prints patched');
     assert.match(patcherSrc, /unverified: 'ccx-unverified:'/, 'the patcher no longer prints the version mismatch');
     assert.match(patcherSrc, /upstream: 'ccx-upstream:'/, 'the patcher no longer reports the published release');
+    assert.match(patcherSrc, /healed: 'ccx-result: healed'/, 'the patcher no longer reports a heal');
+    assert.match(patcherSrc, /blocked: 'ccx-heal-blocked:'/, 'the patcher no longer reports why a heal stopped');
     assert.match(keeperSrc, /ccx-result: patched/, 'the keeper no longer looks for the patched line');
     assert.match(hostSrc, /ccx-result: patched/, 'the host watcher no longer looks for the patched line');
     for (const [who, src] of [
@@ -268,6 +333,8 @@ try {
     ]) {
         assert.match(src, /\^ccx-unverified: \(\\S\+\) \(\\S\+\)\$/, `${who} no longer reads the version mismatch`);
         assert.match(src, /\^ccx-upstream: \(\\S\+\) \(\\S\+\)\$/, `${who} no longer reads the published release`);
+        assert.match(src, /\^ccx-result: healed \(\\S\+\)\$/, `${who} no longer reads a completed heal`);
+        assert.match(src, /\^ccx-heal-blocked: \(\\S\+\)\$/, `${who} no longer reads why a heal stopped`);
         assert.match(src, /'--if-needed'/, `${who} no longer calls the patcher with --if-needed`);
     }
     console.log('OK — patcher, keeper and host watcher still speak the same result lines');

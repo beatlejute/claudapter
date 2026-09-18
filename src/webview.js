@@ -162,6 +162,23 @@
                 'Model',
                 toggleHistoryBeforeCompaction
             );
+            // Only where a clone is on record: without one there is nothing to pull, and a switch that
+            // can only ever fail is worse than no switch. The host decides, not the page.
+            if (state.selfUpdateRepo)
+                registry.registerAction(
+                    {
+                        id: 'ccx-self-update',
+                        label: 'Update Claudapter by itself',
+                        description:
+                            'When a Claude Code update breaks the patch and a fix is published, pull ' +
+                            state.selfUpdateRepo +
+                            ' and re-apply — never over uncommitted changes',
+                        trailingComponent: selfUpdateTick(),
+                        keepMenuOpen: true,
+                    },
+                    'Model',
+                    toggleSelfUpdate
+                );
         } catch (e) {
             console.warn('ccx: registerAction failed', e);
         }
@@ -358,6 +375,10 @@
                 now: d.now || Date.now(),
                 sessionId: d.sessionId || state.sessionId,
                 historyBeforeCompaction: d.historyBeforeCompaction === true,
+                // The state the page keeps is rebuilt field by field, not merged — anything the host
+                // sends and this list does not name is dropped on the next push.
+                selfUpdate: d.selfUpdate === true,
+                selfUpdateRepo: d.selfUpdateRepo || null,
             };
             rememberHistoryBeforeCompaction(state.historyBeforeCompaction);
             adoptAttachmentPrompts(d.attachmentPrompts);
@@ -1698,6 +1719,24 @@
     function historyTick() {
         if (!jsx) return undefined;
         return stockToggle(historyBeforeCompactionPref());
+    }
+
+    // No local preference behind this one, unlike the two switches above: arming self-update writes a
+    // file the patcher reads from another process entirely, so the host's answer is the only truth
+    // there is. The click is optimistic and the broadcast that follows corrects it if it has to.
+    function selfUpdateTick() {
+        if (!jsx) return undefined;
+        return stockToggle(state.selfUpdate === true);
+    }
+
+    function toggleSelfUpdate() {
+        var next = state.selfUpdate !== true;
+        state.selfUpdate = next;
+        send({ type: 'ccx:selfUpdate', enabled: next });
+        syncAction();
+        toast(next
+            ? 'Claudapter will update itself when an update breaks the patch — never over uncommitted changes'
+            : 'Claudapter will tell you what to pull instead of pulling it');
     }
 
     // Nothing reloads here. Rebuilding the open transcript means relaunching its CLI, which is not

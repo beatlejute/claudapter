@@ -774,6 +774,43 @@ function setHistoryBeforeCompaction(enabled) {
     writeJson(HISTORY_FILE, { enabled: Boolean(enabled) });
 }
 
+// --- self-update ----------------------------------------------------------------------------------
+//
+// The switch that lets a broken patch fix itself: armed, apply-patch.mjs fast-forwards the clone the
+// installer was last run from and re-runs it. See "Self-update" in the README for what it refuses to do.
+//
+// Read from disk on every call for the same reason as the switch above — each VS Code window is its own
+// extension host with its own S, and a flip in one window has to reach the others.
+const SELF_UPDATE_FILE = path.join(DIR, 'self-update.json');
+const STAMP_FILE = path.join(DIR, 'patch-version.json');
+
+function selfUpdateEnabled() {
+    const raw = readJson(SELF_UPDATE_FILE);
+    return Boolean(raw && raw.enabled === true);
+}
+
+// Which clone would be pulled. Without one there is nothing to arm, so the page leaves the row out
+// rather than offering a switch that could only ever fail.
+function selfUpdateRepo() {
+    const raw = readJson(SELF_UPDATE_FILE);
+    if (raw && typeof raw.repoPath === 'string') return raw.repoPath;
+    const stamp = readJson(STAMP_FILE);
+    return stamp && typeof stamp.repoPath === 'string' ? stamp.repoPath : null;
+}
+
+function setSelfUpdate(enabled) {
+    if (!enabled) {
+        try {
+            fs.unlinkSync(SELF_UPDATE_FILE);
+        } catch {}
+        return true;
+    }
+    const repoPath = selfUpdateRepo();
+    if (!repoPath) return false;
+    writeJson(SELF_UPDATE_FILE, { enabled: true, repoPath, armedAt: new Date().toISOString() });
+    return true;
+}
+
 // `byUuid` is the stock walk's own map, taken before it relinks anything. Every compaction keeps a short
 // tail of the conversation (compactMetadata.preservedMessages), and the walk moves that tail to just
 // after the summary. So a boundary is joined to what preceded the tail, not to logicalParentUuid: that
@@ -1182,6 +1219,10 @@ function stateFor(sessionId, webview) {
         // Not about this tab's session — the whole list, since the history list is what reads it
         pinnedSessions: loadPinned(),
         historyBeforeCompaction: historyBeforeCompaction(),
+        selfUpdate: selfUpdateEnabled(),
+        // No clone recorded means nothing to arm — the page drops the row rather than offering a
+        // switch that could only ever fail
+        selfUpdateRepo: selfUpdateRepo(),
         models: active && active !== 'claude' ? modelsOf(active) : null,
         // `now` rather than a per-row Date.now(): every age in the panel is then measured from the
         // same instant, so two rows probed together never read as a minute apart.
@@ -1485,6 +1526,23 @@ function upstreamCovers(out) {
     return standing === 'covers' ? published : null;
 }
 
+// Why the published fix did not install itself. `not-armed` is the default state and says what to turn
+// on; the rest are conditions on this machine that a person has to clear, and naming which one is the
+// difference between a notification that can be acted on and one that cannot.
+const HEAL_HINTS = {
+    'not-armed': 'Pull it and re-run "node scripts/install.mjs" — or arm self-update once with "npm run setup:auto".',
+    dirty: 'Self-update stopped: the clone has uncommitted changes. Commit or stash them, then re-run "npm run setup".',
+    'no-clone': 'Self-update could not find the clone it was armed from. Re-run "npm run setup:auto" from it.',
+    'no-upstream': 'Self-update stopped: the clone is not on a branch that tracks a remote.',
+    'pull-failed': 'Self-update could not fast-forward the clone. Pull it by hand and re-run "npm run setup".',
+    'install-failed': 'Self-update pulled the clone, but the patch still did not go on.',
+};
+
+function healHint(out) {
+    const reason = (out.match(/^ccx-heal-blocked: (\S+)$/m) || [])[1];
+    return HEAL_HINTS[reason] || HEAL_HINTS['not-armed'];
+}
+
 function repositoryUrl() {
     const url = readJson(path.join(DIR, 'patch-version.json'))?.repository;
     return typeof url === 'string' ? url.replace(/^git\+/, '').replace(/\.git$/, '') : null;
@@ -1535,7 +1593,16 @@ function repatchAfterUpdate() {
         dlog('repatch', { dir: path.basename(newest), code, out: out.trim() });
         if (code === 0) {
             tries.set(newest, REPATCH_TRIES);
-            if (out.includes('ccx-result: patched')) offerReload(reloadMessage(out));
+            // Healed: the patch did not fit, a release that does was published, and self-update pulled
+            // the clone and re-ran the installer. Nothing was asked of anyone — but this window is still
+            // running the bundle from before, so the reload is the one thing left.
+            const healed = (out.match(/^ccx-result: healed (\S+)$/m) || [])[1];
+            if (healed)
+                offerReload(
+                    `Claudapter: Claude Code ${healed} broke the patch, so Claudapter updated itself and ` +
+                        're-applied it.',
+                );
+            else if (out.includes('ccx-result: patched')) offerReload(reloadMessage(out));
             return;
         }
         if (attempt + 1 < REPATCH_TRIES) return void setTimeout(repatchAfterUpdate, 15000);
@@ -1547,7 +1614,7 @@ function repatchAfterUpdate() {
         showUpdateProblem(
             published
                 ? `Claudapter: the patch does not fit Claude Code ${version}, but Claudapter ${published} is ` +
-                      'published. Pull it and re-run "node scripts/install.mjs".'
+                      `published. ${healHint(out)}`
                 : `Claudapter: the patch does not fit Claude Code ${version} — its signatures moved, so it ` +
                       'was not applied. Claude Code itself is untouched and working.',
         );
@@ -1796,6 +1863,13 @@ function attachWebview(webview) {
             setHistoryBeforeCompaction(m.enabled);
             dlog('history before compaction', { enabled: Boolean(m.enabled) });
             // One switch for every tab: each of them draws it in its own menu.
+            broadcast();
+        } else if (m.type === 'ccx:selfUpdate') {
+            const ok = setSelfUpdate(m.enabled);
+            dlog('self-update', { enabled: Boolean(m.enabled), armed: ok, repo: selfUpdateRepo() });
+            // The page only draws the row when a clone is on record, so arming cannot normally fail —
+            // and if it somehow does, the state that comes back is the truth and the switch follows it
+            // rather than the click.
             broadcast();
         } else if (m.type === 'ccx:openProfile') {
             openProfileFile(m.name);
